@@ -115,9 +115,7 @@ app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
   }
 });
 
-// ============================================
-// ROUTES - SINGLE MOUNTING ONLY
-// ============================================
+
 
 // Helper function to safely mount routes
 const mountRoute = (path, router, name) => {
@@ -157,18 +155,15 @@ mountRoute('/api/reports', reportRoutes, 'Report Routes');
 mountRoute('/api/currency', currencyRoutes, 'Currency Routes');
 mountRoute('/api/uploads', uploadRoutes, 'Upload Routes'); // ✅ MOUNTED
 
-// ============================================
-// HEALTH CHECK
-// ============================================
-app.get('/api/health', (req, res) => {
-  res.json({
+app.get('/', (req, res) => {
+  res.status(200).json({
     success: true,
-    status: 'OK',
-    message: 'Server is running',
+    message: '🚀 Medyra Backend API is running successfully!',
+    version: '1.0.0',
+    documentation: '/api/health',
     timestamp: new Date().toISOString()
   });
 });
-
 // ============================================
 // 404 Handler
 // ============================================
