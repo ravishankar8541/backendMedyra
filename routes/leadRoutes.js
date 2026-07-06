@@ -4,6 +4,7 @@ const { body } = require('express-validator');
 const {
   createLead,
   getLeads,
+  getLead,          // ✅ NEW
   updateLeadStatus,
   assignLead,
   deleteLead,
@@ -24,6 +25,7 @@ router.route('/')
   .post(leadValidation, createLead)
   .get(getLeads);
 
+router.get('/:id', getLead);  // ✅ NEW: Get single lead
 router.put('/:id/status', updateLeadStatus);
 router.put('/:id/assign', restrictTo('admin', 'manager'), assignLead);
 router.delete('/:id', deleteLead);

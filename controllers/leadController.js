@@ -1,6 +1,7 @@
 const Lead = require('../models/Lead');
 const Revenue = require('../models/Revenue');
 const User = require('../models/User');
+const Product = require('../models/Product');
 
 // ✅ Incentive Calculation Function (Matches Frontend)
 const calculateIncentive = (revenue, profitPercentage) => {
@@ -13,6 +14,27 @@ const calculateIncentive = (revenue, profitPercentage) => {
   return 0;
 };
 
+// ✅ Calculate item totals
+const calculateItemTotals = (item) => {
+  const qty = item.quantity || 1;
+  const sellingPrice = item.sellingPrice || 0;
+  const costPrice = item.costPrice || 0;
+  
+  const totalValue = sellingPrice * qty;
+  const totalCost = costPrice * qty;
+  const profitAmount = totalValue - totalCost;
+  const profitPercentage = totalCost > 0 ? (profitAmount / totalCost) * 100 : 0;
+  const incentive = calculateIncentive(profitPercentage, totalValue);
+  
+  return {
+    ...item,
+    totalValue,
+    profitAmount,
+    profitPercentage,
+    incentive
+  };
+};
+
 // ✅ Update Revenue Helper
 const updateRevenue = async (lead, action) => {
   try {
@@ -21,8 +43,10 @@ const updateRevenue = async (lead, action) => {
     const year = date.getFullYear();
     const quarter = `Q${Math.floor(date.getMonth() / 3) + 1}`;
 
-    const profitPercentage = lead.value > 0 ? (lead.profit / lead.value) * 100 : 0;
-    const incentive = calculateIncentive(lead.value, profitPercentage);
+    const totalValue = lead.totalValue || lead.value || 0;
+    const totalProfit = lead.totalProfit || lead.profit || 0;
+    const profitPercentage = totalValue > 0 ? (totalProfit / totalValue) * 100 : 0;
+    const incentive = lead.totalIncentive || lead.incentive || 0;
 
     // Update monthly
     await Revenue.findOneAndUpdate(
@@ -34,7 +58,7 @@ const updateRevenue = async (lead, action) => {
       },
       {
         $inc: {
-          revenue: action === 'add' ? lead.value : 0,
+          revenue: action === 'add' ? totalValue : 0,
           converted: action === 'add' && lead.status === 'converted' ? 1 : 0,
           leads: action === 'add' ? 1 : 0
         },
@@ -57,7 +81,7 @@ const updateRevenue = async (lead, action) => {
       },
       {
         $inc: {
-          revenue: action === 'add' ? lead.value : 0,
+          revenue: action === 'add' ? totalValue : 0,
           converted: action === 'add' && lead.status === 'converted' ? 1 : 0,
           leads: action === 'add' ? 1 : 0
         },
@@ -80,7 +104,7 @@ const updateRevenue = async (lead, action) => {
       },
       {
         $inc: {
-          revenue: action === 'add' ? lead.value : 0,
+          revenue: action === 'add' ? totalValue : 0,
           converted: action === 'add' && lead.status === 'converted' ? 1 : 0,
           leads: action === 'add' ? 1 : 0
         },
@@ -98,7 +122,7 @@ const updateRevenue = async (lead, action) => {
 };
 
 // ============================================
-// CREATE LEAD
+// CREATE LEAD - Updated for multiple products
 // ============================================
 exports.createLead = async (req, res) => {
   try {
@@ -112,10 +136,50 @@ exports.createLead = async (req, res) => {
       if (user) leadData.assignedToName = user.name;
     }
 
-    // ✅ Calculate profit and incentive
-    if (leadData.value) {
-      leadData.profit = leadData.value * 0.2; // 20% profit margin
-      leadData.incentive = calculateIncentive(leadData.value, 20);
+    // ✅ Process items if present
+    if (leadData.items && leadData.items.length > 0) {
+      // Get product details for each item
+      for (let item of leadData.items) {
+        if (item.productId) {
+          const product = await Product.findById(item.productId);
+          if (product) {
+            item.productName = product.name;
+            item.productSku = product.sku;
+            // If cost price not provided, get from product
+            if (!item.costPrice) {
+              item.costPrice = product.pricing?.costPrice || 0;
+            }
+          }
+        }
+        // Calculate totals for each item
+        const calculatedItem = calculateItemTotals(item);
+        Object.assign(item, calculatedItem);
+      }
+      
+      // Calculate totals
+      let totalValue = 0;
+      let totalProfit = 0;
+      let totalIncentive = 0;
+      leadData.items.forEach(item => {
+        totalValue += item.totalValue || 0;
+        totalProfit += item.profitAmount || 0;
+        totalIncentive += item.incentive || 0;
+      });
+      
+      leadData.totalValue = totalValue;
+      leadData.totalProfit = totalProfit;
+      leadData.totalIncentive = totalIncentive;
+      
+      // Legacy fields for compatibility
+      leadData.value = totalValue;
+      leadData.profit = totalProfit;
+      leadData.incentive = totalIncentive;
+    } else {
+      // ✅ Legacy single product support
+      if (leadData.value) {
+        leadData.profit = leadData.value * 0.2;
+        leadData.incentive = calculateIncentive(leadData.value, 20);
+      }
     }
 
     const lead = new Lead(leadData);
@@ -159,7 +223,6 @@ exports.getLeads = async (req, res) => {
     if (source && source !== 'all') query.source = source;
     if (assignedTo) query.assignedTo = assignedTo;
 
-    // ✅ Filter by assigned user for telecallers
     if (req.user.role === 'telecaller') {
       query.assignedTo = req.user.id;
     }
@@ -194,6 +257,29 @@ exports.getLeads = async (req, res) => {
 };
 
 // ============================================
+// GET SINGLE LEAD - NEW
+// ============================================
+exports.getLead = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id)
+      .populate('assignedTo', 'name email')
+      .populate('createdBy', 'name');
+
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    res.json({
+      success: true,
+      data: lead
+    });
+  } catch (error) {
+    console.error('Get lead error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
 // UPDATE LEAD STATUS
 // ============================================
 exports.updateLeadStatus = async (req, res) => {
@@ -205,7 +291,6 @@ exports.updateLeadStatus = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    // ✅ Check authorization
     if (req.user.role === 'telecaller' &&
         lead.assignedTo.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
@@ -216,7 +301,6 @@ exports.updateLeadStatus = async (req, res) => {
     if (status === 'converted') {
       lead.conversionDate = new Date();
 
-      // ✅ Calculate profit and incentive if not set
       if (lead.value && !lead.profit) {
         lead.profit = lead.value * 0.2;
         lead.incentive = calculateIncentive(lead.value, 20);
@@ -285,7 +369,6 @@ exports.deleteLead = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    // ✅ Check authorization
     if (req.user.role === 'telecaller' &&
         lead.assignedTo.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
@@ -323,9 +406,9 @@ exports.getLeadStats = async (req, res) => {
           qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } },
           converted: { $sum: { $cond: [{ $eq: ['$status', 'converted'] }, 1, 0] } },
           lost: { $sum: { $cond: [{ $eq: ['$status', 'lost'] }, 1, 0] } },
-          totalValue: { $sum: '$value' },
-          totalIncentive: { $sum: '$incentive' },
-          avgValue: { $avg: '$value' }
+          totalValue: { $sum: { $ifNull: ['$totalValue', '$value'] } },
+          totalIncentive: { $sum: { $ifNull: ['$totalIncentive', '$incentive'] } },
+          avgValue: { $avg: { $ifNull: ['$totalValue', '$value'] } }
         }
       }
     ]);
