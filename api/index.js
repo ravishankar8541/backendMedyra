@@ -1,4 +1,4 @@
-// api/index.js
+// api/index.js - SIMPLIFIED FIXED VERSION
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -36,19 +36,16 @@ const packageRoutes = require('../routes/packageRoutes');
 const accountingRoutes = require('../routes/accountingRoutes');
 const reportRoutes = require('../routes/reportRoutes');
 const currencyRoutes = require('../routes/currencyRoutes');
-const uploadRoutes = require('../routes/uploadRoutes'); // ✅ UPLOAD ROUTES
+const uploadRoutes = require('../routes/uploadRoutes'); 
+const quotationRoutes = require('../routes/quotationRoutes');
 
-// ============================================
-// INITIALIZE EXPRESS
-// ============================================
 const app = express();
 
 // Connect to database
 dbConnection();
 
-
 app.use(cors({
-  origin: ['https://medyra-frontend.vercel.app', 'http://localhost:5174', 'http://localhost:5000', 'http://localhost:3000'],
+  origin: ['https://medyra-frontend.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:3000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -73,23 +70,30 @@ const transporter = nodemailer.createTransport({
 });
 
 // ============================================
-// EMAIL API
+// SEND PO EMAIL - FIXED
 // ============================================
 app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
   try {
-    const { emailData } = JSON.parse(req.body.emailData);
+    console.log('📧 Sending PO email...');
+    
+    // Parse email data
+    const emailData = JSON.parse(req.body.emailData);
     const pdfBuffer = req.file;
 
     if (!pdfBuffer) {
       return res.status(400).json({ success: false, error: 'PDF file is required' });
     }
 
+    if (!emailData.to) {
+      return res.status(400).json({ success: false, error: 'Recipient email is required' });
+    }
+
     const mailOptions = {
       from: `"Medyra Pharmaceutical" <${process.env.EMAIL_USER}>`,
       to: emailData.to,
       cc: emailData.cc || '',
-      subject: emailData.subject,
-      html: emailData.html || emailData.body,
+      subject: emailData.subject || 'Purchase Order from Medyra Pharmaceutical',
+      html: emailData.html || emailData.body || 'Please find attached the purchase order.',
       attachments: [
         {
           filename: `PO-${emailData.poNumber || 'PO'}.pdf`,
@@ -100,6 +104,7 @@ app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
     };
 
     const info = await transporter.sendMail(mailOptions);
+    console.log('✅ Email sent:', info.messageId);
 
     res.json({
       success: true,
@@ -107,7 +112,7 @@ app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
       message: 'Email sent successfully'
     });
   } catch (error) {
-    console.error('Email error:', error);
+    console.error('❌ Email error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -115,7 +120,30 @@ app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
   }
 });
 
+// ============================================
+// TEST EMAIL - SIMPLE DEBUG ENDPOINT
+// ============================================
+app.post('/api/test-email', async (req, res) => {
+  try {
+    const { to } = req.body;
+    
+    if (!to) {
+      return res.status(400).json({ success: false, error: 'Email required' });
+    }
 
+    const mailOptions = {
+      from: `"Medyra Pharmaceutical" <${process.env.EMAIL_USER}>`,
+      to: to,
+      subject: 'Test Email',
+      text: 'Your email configuration is working!'
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ success: true, message: 'Test email sent' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // Helper function to safely mount routes
 const mountRoute = (path, router, name) => {
@@ -153,17 +181,18 @@ mountRoute('/api/packages', packageRoutes, 'Package Routes');
 mountRoute('/api/accounting', accountingRoutes, 'Accounting Routes');
 mountRoute('/api/reports', reportRoutes, 'Report Routes');
 mountRoute('/api/currency', currencyRoutes, 'Currency Routes');
-mountRoute('/api/uploads', uploadRoutes, 'Upload Routes'); // ✅ MOUNTED
+mountRoute('/api/uploads', uploadRoutes, 'Upload Routes'); 
+mountRoute('/api/quotations', quotationRoutes, 'Quotation Routes');
 
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
     message: '🚀 Medyra Backend API is running successfully!',
     version: '1.0.0',
-    documentation: '/api/health',
     timestamp: new Date().toISOString()
   });
 });
+
 // ============================================
 // 404 Handler
 // ============================================

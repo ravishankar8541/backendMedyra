@@ -190,3 +190,136 @@ exports.deleteInvoice = async (req, res) => {
     });
   }
 };
+
+
+
+exports.createInvoiceFromQuotation = async (req, res) => {
+  try {
+    const { quotationId } = req.body;
+    
+    // 1️⃣ Get Quotation with all data
+    const quotation = await Quotation.findById(quotationId)
+      .populate('leadId', 'name phone email address');
+    
+    if (!quotation) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Quotation not found' 
+      });
+    }
+    
+    // 2️⃣ Check if invoice already exists
+    const existingInvoice = await Invoice.findOne({ quotationId });
+    if (existingInvoice) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invoice already exists for this quotation' 
+      });
+    }
+    
+    // 3️⃣ Generate invoice number
+    const year = new Date().getFullYear();
+    const count = await Invoice.countDocuments();
+    const invoiceNumber = `MPDMS${year}/${String(count + 1).padStart(3, '0')}`;
+    
+    // 4️⃣ ✅ AUTO-FILL INVOICE FROM QUOTATION
+    const invoiceData = {
+      invoiceNumber,
+      type: quotation.type || 'domestic',
+      
+      // ✅ Customer Details - Auto-filled from Quotation
+      customer: {
+        name: quotation.customer?.name || quotation.leadId?.name || 'N/A',
+        phone: quotation.customer?.phone || quotation.leadId?.phone || 'N/A',
+        email: quotation.customer?.email || quotation.leadId?.email || '',
+        address: quotation.customer?.address || quotation.leadId?.address || 'N/A',
+        gst: quotation.customer?.gst || '',
+        drugLicense: quotation.customer?.drugLicense || '',
+        state: quotation.customer?.state || '',
+        stateCode: quotation.customer?.stateCode || '',
+        country: quotation.customer?.country || 'India'
+      },
+      
+      // ✅ Items - Auto-filled from Quotation
+      items: quotation.items.map(item => ({
+        description: item.productName || item.description,
+        quantity: item.quantity,
+        rate: item.rate,
+        taxRate: item.taxRate || 18,
+        amount: item.total || (item.quantity * item.rate),
+        batch: item.batch || '',
+        hsCode: item.hsCode || '',
+        mfgDate: item.mfgDate || '',
+        expiryDate: item.expiryDate || '',
+        unit: item.unit || 'Vial'
+      })),
+      
+      // ✅ Totals - Auto-filled from Quotation
+      subtotal: quotation.subtotal || 0,
+      tax: quotation.tax || 0,
+      total: quotation.total || 0,
+      rounding: quotation.rounding || 0,
+      totalInWords: quotation.totalInWords || '',
+      
+      // ✅ Dates
+      date: new Date().toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      
+      // ✅ Terms
+      paymentTerms: quotation.paymentTerms || '100% Advance',
+      placeOfSupply: quotation.placeOfSupply || 'Gujarat (24)',
+      notes: quotation.notes || 'Thanks for your business.',
+      terms: quotation.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
+      
+      // ✅ International fields (if any)
+      portOfLoading: quotation.portOfLoading || '',
+      portOfDischarge: quotation.portOfDischarge || '',
+      destinationCountry: quotation.destinationCountry || '',
+      grossWeight: quotation.grossWeight || '',
+      netWeight: quotation.netWeight || '',
+      volumetricWeight: quotation.volumetricWeight || '',
+      countryOfOriginGoods: quotation.countryOfOriginGoods || 'India',
+      totalBoxes: quotation.totalBoxes || '',
+      
+      // ✅ References
+      quotationId: quotation._id,
+      leadId: quotation.leadId?._id || quotation.leadId,
+      
+      // ✅ Status
+      status: 'draft',
+      createdBy: req.user.id
+    };
+    
+    // 5️⃣ Create Invoice
+    const invoice = new Invoice(invoiceData);
+    await invoice.save();
+    
+    // 6️⃣ Update Lead Status
+    if (quotation.leadId) {
+      await Lead.findByIdAndUpdate(quotation.leadId, {
+        status: 'converted',
+        conversionDate: new Date()
+      });
+    }
+    
+    // 7️⃣ Update Quotation Status
+    quotation.status = 'invoiced';
+    await quotation.save();
+    
+    // 8️⃣ Populate createdBy
+    await invoice.populate('createdBy', 'name');
+    
+    res.status(201).json({
+      success: true,
+      data: invoice,
+      message: `✅ Invoice ${invoiceNumber} created successfully from quotation!`
+    });
+    
+  } catch (error) {
+    console.error('❌ Create invoice from quotation error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to create invoice' 
+    });
+  }
+};

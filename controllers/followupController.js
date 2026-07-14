@@ -1,9 +1,7 @@
 const Followup = require('../models/FollowUp'); 
 const Lead = require('../models/Lead');
 
-// ============================================
-// GET ALL FOLLOWUPS
-// ============================================
+
 exports.getFollowups = async (req, res) => {
   try {
     const {

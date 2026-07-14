@@ -1,14 +1,18 @@
+// routes/leadRoutes.js - COMPLETE UPDATED VERSION
+
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
 const {
   createLead,
   getLeads,
-  getLead,          // ✅ NEW
+  getLead,
   updateLeadStatus,
   assignLead,
   deleteLead,
-  getLeadStats
+  getLeadStats,
+  createInvoiceFromLead
+  // ✅ NEW
 } = require('../controllers/leadController');
 const { protect, restrictTo } = require('../middleware/auth');
 
@@ -20,14 +24,24 @@ const leadValidation = [
 
 router.use(protect);
 
+// Stats
 router.get('/stats', getLeadStats);
+
+// Create & Get all leads
 router.route('/')
   .post(leadValidation, createLead)
-  .get(getLeads);
+  .get(getLeads);  // Accountant can view all leads
 
-router.get('/:id', getLead);  // ✅ NEW: Get single lead
+// Single lead operations
+router.get('/:id', getLead);
 router.put('/:id/status', updateLeadStatus);
 router.put('/:id/assign', restrictTo('admin', 'manager'), assignLead);
 router.delete('/:id', deleteLead);
+
+// ✅ NEW: Create invoice from lead (Accountant only)
+router.post('/:id/create-invoice', 
+  restrictTo('accountant', 'admin'), 
+  createInvoiceFromLead
+);
 
 module.exports = router;

@@ -6,7 +6,8 @@ const {
   getInvoices,
   getInvoice,
   updateInvoiceStatus,
-  deleteInvoice
+  deleteInvoice,
+  createInvoiceFromQuotation
 } = require('../controllers/invoiceController');
 const { protect, restrictTo } = require('../middleware/auth');
 
@@ -19,6 +20,9 @@ const invoiceValidation = [
   body('dueDate').notEmpty().withMessage('Due date required')
 ];
 
+
+// ✅ NEW: Create invoice from quotation (Auto-fill)
+router.post('/from-quotation', protect, restrictTo('accountant', 'admin'), createInvoiceFromQuotation);
 // Routes
 router.route('/')
   .post(protect, invoiceValidation, createInvoice)

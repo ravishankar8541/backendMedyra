@@ -1,9 +1,11 @@
+// controllers/leadController.js - FINAL VERSION
+
 const Lead = require('../models/Lead');
 const Revenue = require('../models/Revenue');
 const User = require('../models/User');
 const Product = require('../models/Product');
 
-// ✅ Incentive Calculation Function (Matches Frontend)
+// ✅ Incentive Calculation
 const calculateIncentive = (revenue, profitPercentage) => {
   if (profitPercentage < 10) return 0;
   if (profitPercentage >= 10 && profitPercentage < 15) return revenue * 0.004;
@@ -121,45 +123,35 @@ const updateRevenue = async (lead, action) => {
   }
 };
 
-// ============================================
-// CREATE LEAD - Updated for multiple products
-// ============================================
+// ✅ CREATE LEAD
 exports.createLead = async (req, res) => {
   try {
     const leadData = req.body;
     leadData.createdBy = req.user.id;
     leadData.assignedTo = leadData.assignedTo || req.user.id;
 
-    // ✅ Get assigned user name
     if (leadData.assignedTo) {
       const user = await User.findById(leadData.assignedTo);
       if (user) leadData.assignedToName = user.name;
     }
 
-    // ✅ Process items if present
     if (leadData.items && leadData.items.length > 0) {
-      // Get product details for each item
       for (let item of leadData.items) {
         if (item.productId) {
           const product = await Product.findById(item.productId);
           if (product) {
             item.productName = product.name;
             item.productSku = product.sku;
-            // If cost price not provided, get from product
             if (!item.costPrice) {
               item.costPrice = product.pricing?.costPrice || 0;
             }
           }
         }
-        // Calculate totals for each item
         const calculatedItem = calculateItemTotals(item);
         Object.assign(item, calculatedItem);
       }
       
-      // Calculate totals
-      let totalValue = 0;
-      let totalProfit = 0;
-      let totalIncentive = 0;
+      let totalValue = 0, totalProfit = 0, totalIncentive = 0;
       leadData.items.forEach(item => {
         totalValue += item.totalValue || 0;
         totalProfit += item.profitAmount || 0;
@@ -169,13 +161,10 @@ exports.createLead = async (req, res) => {
       leadData.totalValue = totalValue;
       leadData.totalProfit = totalProfit;
       leadData.totalIncentive = totalIncentive;
-      
-      // Legacy fields for compatibility
       leadData.value = totalValue;
       leadData.profit = totalProfit;
       leadData.incentive = totalIncentive;
     } else {
-      // ✅ Legacy single product support
       if (leadData.value) {
         leadData.profit = leadData.value * 0.2;
         leadData.incentive = calculateIncentive(leadData.value, 20);
@@ -185,7 +174,6 @@ exports.createLead = async (req, res) => {
     const lead = new Lead(leadData);
     await lead.save();
 
-    // ✅ Update revenue if converted
     if (leadData.status === 'converted') {
       await updateRevenue(lead, 'add');
     }
@@ -203,9 +191,7 @@ exports.createLead = async (req, res) => {
   }
 };
 
-// ============================================
-// GET ALL LEADS
-// ============================================
+// ✅ GET ALL LEADS
 exports.getLeads = async (req, res) => {
   try {
     const {
@@ -232,7 +218,7 @@ exports.getLeads = async (req, res) => {
     }
 
     const leads = await Lead.find(query)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email role')
       .populate('createdBy', 'name')
       .sort(sortBy)
       .skip((page - 1) * limit)
@@ -240,9 +226,30 @@ exports.getLeads = async (req, res) => {
 
     const total = await Lead.countDocuments(query);
 
+    let stats = null;
+    if (['accountant', 'admin', 'manager'].includes(req.user.role)) {
+      stats = await Lead.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            totalValue: { $sum: '$value' },
+            totalIncentive: { $sum: '$incentive' },
+            converted: { $sum: { $cond: [{ $eq: ['$status', 'converted'] }, 1, 0] } },
+            new: { $sum: { $cond: [{ $eq: ['$status', 'new'] }, 1, 0] } },
+            contacted: { $sum: { $cond: [{ $eq: ['$status', 'contacted'] }, 1, 0] } },
+            qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } }
+          }
+        }
+      ]);
+      stats = stats[0] || null;
+    }
+
     res.json({
       success: true,
       data: leads,
+      stats,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -256,9 +263,7 @@ exports.getLeads = async (req, res) => {
   }
 };
 
-// ============================================
-// GET SINGLE LEAD - NEW
-// ============================================
+// ✅ GET SINGLE LEAD
 exports.getLead = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id)
@@ -279,12 +284,10 @@ exports.getLead = async (req, res) => {
   }
 };
 
-// ============================================
-// UPDATE LEAD STATUS
-// ============================================
+// ✅ UPDATE LEAD STATUS
 exports.updateLeadStatus = async (req, res) => {
   try {
-    const { status, notes } = req.body;
+    const { status, notes, quotationAmount, paymentDetails } = req.body;
     const lead = await Lead.findById(req.params.id);
 
     if (!lead) {
@@ -296,28 +299,97 @@ exports.updateLeadStatus = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    lead.status = status;
-    if (notes) lead.notes = notes;
-    if (status === 'converted') {
-      lead.conversionDate = new Date();
+    const validTransitions = {
+      'new': ['contacted', 'lost'],
+      'contacted': ['qualified', 'lost'],
+      'qualified': ['quotation_sent', 'lost'],
+      'quotation_sent': ['order_confirmed', 'lost'],
+      'order_confirmed': ['payment_pending', 'lost'],
+      'payment_pending': ['converted', 'lost'],
+      'converted': [],
+      'lost': []
+    };
 
-      if (lead.value && !lead.profit) {
-        lead.profit = lead.value * 0.2;
-        lead.incentive = calculateIncentive(lead.value, 20);
-      }
-
-      await lead.save();
-      await updateRevenue(lead, 'add');
-    } else {
-      await lead.save();
+    if (!validTransitions[lead.status]?.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status transition from '${lead.status}' to '${status}'`
+      });
     }
 
+    const oldStatus = lead.status;
+    lead.status = status;
+    if (notes) lead.notes = notes;
+
+    switch(status) {
+      case 'quotation_sent':
+        lead.quotation = {
+          sentDate: new Date(),
+          amount: quotationAmount || lead.value,
+          notes: notes || 'Quotation sent',
+          followUpDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+        };
+        break;
+
+      case 'order_confirmed':
+        lead.orderConfirmedAt = new Date();
+        break;
+
+      case 'payment_pending':
+        if (paymentDetails) {
+          lead.payment = {
+            status: 'pending',
+            amount: paymentDetails.amount || lead.value,
+            method: paymentDetails.method || 'advance',
+            dueDate: paymentDetails.dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            notes: paymentDetails.notes || 'Awaiting payment'
+          };
+        }
+        break;
+
+      case 'converted':
+        lead.conversionDate = new Date();
+        
+        if (lead.value && !lead.profit) {
+          lead.profit = lead.value * 0.2;
+          lead.incentive = calculateIncentive(lead.value, 20);
+        }
+        
+        if (lead.payment) {
+          lead.payment.status = 'paid';
+          lead.payment.date = new Date();
+        }
+        
+        await updateRevenue(lead, 'add');
+        break;
+    }
+
+    lead.statusHistory.push({
+      status: status,
+      date: new Date(),
+      notes: notes || `Status updated from ${oldStatus} to ${status}`,
+      updatedBy: req.user.id
+    });
+
+    await lead.save();
     await lead.populate('assignedTo', 'name email');
+    await lead.populate('createdBy', 'name');
+
+    const statusMessages = {
+      'new': 'Lead added successfully',
+      'contacted': 'Lead marked as contacted',
+      'qualified': 'Lead qualified successfully',
+      'quotation_sent': 'Quotation sent successfully',
+      'order_confirmed': 'Order confirmed by customer',
+      'payment_pending': 'Waiting for customer payment',
+      'converted': '🎉 Lead converted successfully!',
+      'lost': 'Lead marked as lost'
+    };
 
     res.json({
       success: true,
       data: lead,
-      message: `Lead status updated to ${status}`
+      message: statusMessages[status] || `Status updated to ${status}`
     });
   } catch (error) {
     console.error('Update lead status error:', error);
@@ -325,9 +397,7 @@ exports.updateLeadStatus = async (req, res) => {
   }
 };
 
-// ============================================
-// ASSIGN LEAD
-// ============================================
+// ✅ ASSIGN LEAD
 exports.assignLead = async (req, res) => {
   try {
     const { assignedTo } = req.body;
@@ -359,9 +429,7 @@ exports.assignLead = async (req, res) => {
   }
 };
 
-// ============================================
-// DELETE LEAD
-// ============================================
+// ✅ DELETE LEAD
 exports.deleteLead = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
@@ -386,9 +454,7 @@ exports.deleteLead = async (req, res) => {
   }
 };
 
-// ============================================
-// GET LEAD STATISTICS
-// ============================================
+// ✅ GET LEAD STATS
 exports.getLeadStats = async (req, res) => {
   try {
     const query = req.user.role === 'telecaller'
@@ -404,6 +470,9 @@ exports.getLeadStats = async (req, res) => {
           new: { $sum: { $cond: [{ $eq: ['$status', 'new'] }, 1, 0] } },
           contacted: { $sum: { $cond: [{ $eq: ['$status', 'contacted'] }, 1, 0] } },
           qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } },
+          quotation_sent: { $sum: { $cond: [{ $eq: ['$status', 'quotation_sent'] }, 1, 0] } },
+          order_confirmed: { $sum: { $cond: [{ $eq: ['$status', 'order_confirmed'] }, 1, 0] } },
+          payment_pending: { $sum: { $cond: [{ $eq: ['$status', 'payment_pending'] }, 1, 0] } },
           converted: { $sum: { $cond: [{ $eq: ['$status', 'converted'] }, 1, 0] } },
           lost: { $sum: { $cond: [{ $eq: ['$status', 'lost'] }, 1, 0] } },
           totalValue: { $sum: { $ifNull: ['$totalValue', '$value'] } },
@@ -413,22 +482,95 @@ exports.getLeadStats = async (req, res) => {
       }
     ]);
 
+    const result = stats[0] || {
+      total: 0,
+      new: 0,
+      contacted: 0,
+      qualified: 0,
+      quotation_sent: 0,
+      order_confirmed: 0,
+      payment_pending: 0,
+      converted: 0,
+      lost: 0,
+      totalValue: 0,
+      totalIncentive: 0,
+      avgValue: 0
+    };
+
+    result.conversionRate = result.total > 0 
+      ? ((result.converted / result.total) * 100).toFixed(1)
+      : 0;
+
     res.json({
       success: true,
-      data: stats[0] || {
-        total: 0,
-        new: 0,
-        contacted: 0,
-        qualified: 0,
-        converted: 0,
-        lost: 0,
-        totalValue: 0,
-        totalIncentive: 0,
-        avgValue: 0
-      }
+      data: result
     });
   } catch (error) {
     console.error('Get lead stats error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ✅ CREATE INVOICE FROM LEAD
+exports.createInvoiceFromLead = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    if (lead.status !== 'converted') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Only converted leads can be invoiced' 
+      });
+    }
+
+    const invoiceData = {
+      customer: {
+        name: lead.name,
+        phone: lead.phone,
+        email: lead.email || '',
+        address: lead.address || 'N/A',
+        gst: lead.gst || '',
+        state: lead.state || ''
+      },
+      items: lead.items && lead.items.length > 0 
+        ? lead.items.map(item => ({
+            description: item.productName || 'Product',
+            quantity: item.quantity || 1,
+            rate: item.sellingPrice || 0,
+            taxRate: 18,
+            amount: item.totalValue || 0,
+            batch: item.batch || '',
+            hsCode: item.hsCode || ''
+          }))
+        : [{
+            description: lead.productName || 'Product',
+            quantity: lead.quantity || 1,
+            rate: (lead.value || 0) / (lead.quantity || 1) || 0,
+            taxRate: 18,
+            amount: lead.value || 0
+          }],
+      subtotal: lead.totalValue || lead.value || 0,
+      tax: ((lead.totalValue || lead.value || 0) * 0.18),
+      total: ((lead.totalValue || lead.value || 0) * 1.18),
+      date: new Date().toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      type: 'domestic',
+      status: 'draft',
+      createdBy: req.user.id,
+      leadId: lead._id
+    };
+
+    res.json({
+      success: true,
+      data: invoiceData,
+      message: 'Invoice data prepared from lead'
+    });
+  } catch (error) {
+    console.error('Create invoice from lead error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
