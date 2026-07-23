@@ -1,3 +1,4 @@
+// routes/invoiceRoutes.js - Updated routes
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
@@ -20,9 +21,9 @@ const invoiceValidation = [
   body('dueDate').notEmpty().withMessage('Due date required')
 ];
 
-
-// ✅ NEW: Create invoice from quotation (Auto-fill)
+// ✅ Create invoice from quotation (Auto-fill)
 router.post('/from-quotation', protect, restrictTo('accountant', 'admin'), createInvoiceFromQuotation);
+
 // Routes
 router.route('/')
   .post(protect, invoiceValidation, createInvoice)
@@ -30,7 +31,7 @@ router.route('/')
 
 router.route('/:id')
   .get(protect, getInvoice)
-  .delete(protect, restrictTo('admin'), deleteInvoice);
+  .delete(protect, restrictTo('admin'), deleteInvoice);  // ✅ Only admin can delete
 
 router.put('/:id/status', protect, updateInvoiceStatus);
 

@@ -1,3 +1,5 @@
+// models/User.js - COMPLETE UPDATED WITH INCENTIVE TRACKING
+
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -81,12 +83,69 @@ const UserSchema = new mongoose.Schema({
     message: String,
     read: Boolean,
     date: Date
+  }],
+
+  // ============================================
+  // ✅ INCENTIVE TRACKING FIELDS
+  // ============================================
+  totalIncentiveEarned: {
+    type: Number,
+    default: 0
+  },
+  totalSalesValue: {
+    type: Number,
+    default: 0
+  },
+  totalConversions: {
+    type: Number,
+    default: 0
+  },
+  totalProfitGenerated: {
+    type: Number,
+    default: 0
+  },
+  incentiveHistory: [{
+    leadId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Lead'
+    },
+    leadName: {
+      type: String
+    },
+    invoiceNumber: {
+      type: String
+    },
+    amount: {
+      type: Number,
+      default: 0
+    },
+    value: {
+      type: Number,
+      default: 0
+    },
+    profit: {
+      type: Number,
+      default: 0
+    },
+    profitPercentage: {
+      type: Number,
+      default: 0
+    },
+    date: {
+      type: Date,
+      default: Date.now
+    },
+    status: {
+      type: String,
+      enum: ['pending', 'credited', 'paid'],
+      default: 'credited'
+    }
   }]
 }, {
   timestamps: true
 });
 
-// ✅ FIXED: Mongoose 8.x compatible - NO 'next' parameter
+// ✅ Password hashing middleware
 UserSchema.pre('save', function() {
   if (this.isModified('password')) {
     const salt = bcrypt.genSaltSync(12);

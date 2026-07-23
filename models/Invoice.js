@@ -1,3 +1,5 @@
+// models/Invoice.js - FIXED VERSION (Mongoose 8.x compatible)
+
 const mongoose = require('mongoose');
 
 const InvoiceItemSchema = new mongoose.Schema({
@@ -32,7 +34,29 @@ const InvoiceItemSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  countryOfOrigin: String
+  countryOfOrigin: String,
+  
+  // ✅ Incentive fields per item
+  costPrice: {
+    type: Number,
+    default: 0
+  },
+  sellingPrice: {
+    type: Number,
+    default: 0
+  },
+  profitAmount: {
+    type: Number,
+    default: 0
+  },
+  profitPercentage: {
+    type: Number,
+    default: 0
+  },
+  incentive: {
+    type: Number,
+    default: 0
+  }
 });
 
 const InvoiceSchema = new mongoose.Schema({
@@ -40,6 +64,14 @@ const InvoiceSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true
+  },
+  proformaNumber: {
+    type: String,
+    default: ''
+  },
+  leadId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Lead'
   },
   type: {
     type: String,
@@ -111,7 +143,7 @@ const InvoiceSchema = new mongoose.Schema({
   paymentDate: Date,
   paymentMethod: String,
   paymentReference: String,
-  
+
   // International fields
   portOfLoading: String,
   portOfDischarge: String,
@@ -137,7 +169,7 @@ const InvoiceSchema = new mongoose.Schema({
     pan: String,
     cin: String
   },
-  
+
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -145,19 +177,51 @@ const InvoiceSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now
+  },
+
+  // ============================================
+  // ✅ INCENTIVE FIELDS
+  // ============================================
+  incentive: {
+    type: Number,
+    default: 0
+  },
+  profit: {
+    type: Number,
+    default: 0
+  },
+  profitPercentage: {
+    type: Number,
+    default: 0
+  },
+  assignedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  assignedToName: {
+    type: String,
+    default: ''
+  },
+  totalValue: {
+    type: Number,
+    default: 0
+  },
+  totalCost: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true
 });
 
-// Generate invoice number
-InvoiceSchema.pre('save', function(next) {
-  if (this.isNew) {
+// ✅ FIXED: Remove 'next' parameter - Mongoose 8.x compatible
+InvoiceSchema.pre('save', function() {
+  if (this.isNew && !this.invoiceNumber) {
     const year = new Date().getFullYear();
     const count = Math.floor(Math.random() * 1000);
     this.invoiceNumber = `MPDMS${year}/${String(count).padStart(3, '0')}`;
   }
-  next();
+  // ✅ No 'next()' needed - mongoose handles it automatically
 });
 
 module.exports = mongoose.model('Invoice', InvoiceSchema);
