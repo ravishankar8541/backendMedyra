@@ -87,7 +87,7 @@ const LeadItemSchema = new mongoose.Schema({
   }
 });
 
-// ✅ ProformaSchema - With incentive fields
+// ✅ ProformaSchema - With incentive fields and conversion tracking
 const ProformaSchema = new mongoose.Schema({
   number: String,
   sentDate: Date,
@@ -128,7 +128,28 @@ const ProformaSchema = new mongoose.Schema({
   countryOfOriginGoods: String,
   totalBoxes: String,
   shippingMark: String,
-  vesselNo: String
+  vesselNo: String,
+  
+  // ✅ NEW: Conversion tracking fields - PER PROFORMA
+  convertedToInvoice: {
+    type: Boolean,
+    default: false
+  },
+  invoiceNumber: {
+    type: String,
+    default: ''
+  },
+  incentive: {
+    type: Number,
+    default: 0
+  },
+  profit: {
+    type: Number,
+    default: 0
+  },
+  conversionDate: {
+    type: Date
+  }
 });
 
 // ✅ Main Lead Schema
@@ -204,7 +225,7 @@ const LeadSchema = new mongoose.Schema({
     default: []
   },
 
-  // ✅ Keep single proforma for current/latest
+  // ✅ Keep single proforma for current/latest (backward compatibility)
   proforma: ProformaSchema,
 
   quotation: {
@@ -299,12 +320,11 @@ LeadSchema.index({ name: 'text', phone: 'text', email: 'text' });
 LeadSchema.index({ status: 1, assignedTo: 1 });
 LeadSchema.index({ createdAt: -1 });
 
-// ✅ FIXED: Pre-save middleware - Only auto-calculate if items exist and not skipped
-LeadSchema.pre('save', function() {
-  // ✅ Skip auto-calculation if flag is set (during conversion)
-  if (this._skipAutoCalculate) {
-    // Still add status history if status changed
+LeadSchema.pre('save', function () {
+  // ✅ Always respect the skip flag first
+  if (this._skipAutoCalculate === true) {
     if (this.isModified('status')) {
+      this.statusHistory = this.statusHistory || [];
       this.statusHistory.push({
         status: this.status,
         date: new Date(),
@@ -312,10 +332,10 @@ LeadSchema.pre('save', function() {
         updatedBy: this._updateBy || this.createdBy
       });
     }
-    return;
+    return; // ← exit immediately, do NOT touch incentives
   }
 
-  // ✅ Only auto-calculate if items array has data
+  // Only auto-calculate from items if we are NOT in conversion/proforma flow
   if (this.items && this.items.length > 0) {
     let totalValue = 0;
     let totalProfit = 0;
@@ -336,15 +356,15 @@ LeadSchema.pre('save', function() {
     this.profit = totalProfit;
     this.incentive = totalIncentive;
     this.quantity = totalQuantity;
-    
+
     if (this.items.length > 0) {
       this.productName = this.items[0].productName || '';
       this.productSku = this.items[0].productSku || '';
     }
   }
 
-  // Add status history if status changed
   if (this.isModified('status')) {
+    this.statusHistory = this.statusHistory || [];
     this.statusHistory.push({
       status: this.status,
       date: new Date(),

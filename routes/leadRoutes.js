@@ -1,4 +1,4 @@
-// routes/leadRoutes.js - COMPLETE FIXED VERSION
+// routes/leadRoutes.js - FIXED
 
 const express = require('express');
 const router = express.Router();
@@ -12,7 +12,8 @@ const {
   deleteLead,
   getLeadStats,
   generateProforma,
-  convertProformaToInvoice
+  convertProformaToInvoice,
+  deleteProforma
 } = require('../controllers/leadController');
 const { protect, restrictTo } = require('../middleware/auth');
 
@@ -38,14 +39,21 @@ router.route('/')
   .post(leadValidation, createLead)
   .get(getLeads);
 
-// ✅ Single lead operations - FIXED: Added PUT route
+// ✅ SINGLE LEAD OPERATIONS
 router.route('/:id')
   .get(getLead)
-  .put(updateLead)           // ← ADD THIS LINE
-  .delete(deleteLead);
+  .put(updateLead)
+  .delete(deleteLead);  // ✅ This deletes LEAD, not proforma
 
-// Status update (separate route)
+// Status update
 router.put('/:id/status', updateLeadStatus);
+
+// ✅ PROFORMA OPERATIONS
+// ✅ Delete specific proforma - FIXED: Use query param to avoid route conflict
+router.delete('/:id/proforma', 
+  restrictTo('telecaller', 'admin', 'manager'), 
+  deleteProforma
+);
 
 // ✅ Proforma Invoice routes
 router.post('/:id/proforma', 
@@ -54,9 +62,20 @@ router.post('/:id/proforma',
   generateProforma
 );
 
-// ✅ Convert Proforma to Invoice (with incentive calculation)
+// ✅ Convert Proforma to Invoice - main endpoint
 router.post('/:id/convert-invoice', 
   restrictTo('accountant', 'admin'), 
+  convertProformaToInvoice
+);
+
+// ✅ Force convert
+router.post('/:id/force-convert', 
+  restrictTo('accountant', 'admin'), 
+  (req, res, next) => {
+    req.query.force = 'true';
+    req.body.force = true;
+    next();
+  },
   convertProformaToInvoice
 );
 

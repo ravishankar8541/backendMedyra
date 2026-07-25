@@ -106,14 +106,13 @@ exports.createLead = async (req, res) => {
 };
 
 // ============================================
-// ✅ UPDATE LEAD - NEW FUNCTION
+// ✅ UPDATE LEAD
 // ============================================
 exports.updateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
 
-    // ✅ Find the lead
     const lead = await Lead.findById(id);
     if (!lead) {
       return res.status(404).json({
@@ -122,23 +121,44 @@ exports.updateLead = async (req, res) => {
       });
     }
 
-    // ✅ Allowed fields to update
     const allowedFields = [
       'name', 'phone', 'email', 'address', 'gst', 
       'drugLicense', 'state', 'stateCode', 'source', 'notes'
     ];
 
-    // ✅ Only update allowed fields
     allowedFields.forEach(field => {
       if (updateData[field] !== undefined) {
         lead[field] = updateData[field];
       }
     });
 
-    // ✅ Save the lead
+    // ✅ If items are being updated, preserve incentives
+    if (updateData.items && updateData.items.length > 0) {
+      lead.items = updateData.items;
+      // Recalculate totals but don't overwrite existing incentives
+      let totalValue = 0, totalProfit = 0, totalIncentive = 0;
+      for (const item of lead.items) {
+        totalValue += item.totalValue || 0;
+        totalProfit += item.profitAmount || 0;
+        totalIncentive += item.incentive || 0;
+      }
+      // Only update if these aren't already set from previous conversions
+      if (!lead.totalIncentive || lead.totalIncentive === 0) {
+        lead.totalIncentive = totalIncentive;
+      }
+      if (!lead.totalProfit || lead.totalProfit === 0) {
+        lead.totalProfit = totalProfit;
+      }
+      if (!lead.totalValue || lead.totalValue === 0) {
+        lead.totalValue = totalValue;
+      }
+      lead.value = totalValue;
+      lead.profit = totalProfit;
+      lead.incentive = totalIncentive;
+    }
+
     await lead.save();
 
-    // ✅ Populate for response
     await lead.populate('assignedTo', 'name email');
     await lead.populate('createdBy', 'name');
 
@@ -156,9 +176,6 @@ exports.updateLead = async (req, res) => {
   }
 };
 
-// ============================================
-// ✅ GENERATE PROFORMA INVOICE
-// ============================================
 exports.generateProforma = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
@@ -178,7 +195,6 @@ exports.generateProforma = async (req, res) => {
       notes = '',
       terms = 'This is a proforma invoice. Prices are valid for 7 days.',
       totalInWords = '',
-      
       portOfLoading = '',
       portOfDischarge = '',
       destinationCountry = '',
@@ -198,6 +214,7 @@ exports.generateProforma = async (req, res) => {
       });
     }
 
+    // ===== Calculate items =====
     let subtotal = 0;
     const proformaItems = [];
 
@@ -243,62 +260,122 @@ exports.generateProforma = async (req, res) => {
 
       proformaItems.push({
         productId: item.productId || null,
-        productName: productName,
-        description: description || '',
-        quantity: quantity,
-        unit: unit,
-        rate: rate,
+        productName,
+        description,
+        quantity,
+        unit,
+        rate,
         sellingPrice: rate,
-        taxRate: taxRate,
-        total: total,
+        taxRate,
+        total,
         totalValue: total,
         batch: batchNumber,
-        hsCode: hsCode,
-        mfgDate: mfgDate,
-        expiryDate: expiryDate,
-        countryOfOrigin: countryOfOrigin,
-        costPrice: costPrice,
+        hsCode,
+        mfgDate,
+        expiryDate,
+        countryOfOrigin,
+        costPrice,
         profitAmount: 0,
         profitPercentage: 0,
         incentive: 0
       });
     }
 
-    let tax = 0;
     const firstTaxRate = proformaItems[0]?.taxRate || 18;
-    tax = (subtotal * firstTaxRate) / 100;
-
+    const tax = (subtotal * firstTaxRate) / 100;
     const total = subtotal + tax;
-    const rounding = Math.round(total * 100) / 100 - total;
-    const finalTotal = Math.round((total + rounding) * 100) / 100;
+    const finalTotal = Math.round(total * 100) / 100;
 
+    // ============================================
+    // ✅ FIXED: Atomic + globally unique proforma number
+    // ============================================
     const year = new Date().getFullYear();
     const prefix = type === 'domestic' ? 'PF' : 'PFI';
-    
-    const allProformas = lead.proformas || [];
-    const count = allProformas.length + 1;
-    const proformaNumber = `${prefix}-${year}/${String(count).padStart(4, '0')}`;
+
+    // Use aggregation to find the real max number safely
+    const result = await Lead.aggregate([
+      { $unwind: { path: '$proformas', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          num: {
+            $cond: [
+              { $regexMatch: { input: { $ifNull: ['$proformas.number', ''] }, regex: `^${prefix}-${year}/\\d+$` } },
+              {
+                $toInt: {
+                  $arrayElemAt: [
+                    { $split: ['$proformas.number', '/'] },
+                    1
+                  ]
+                }
+              },
+              0
+            ]
+          }
+        }
+      },
+      { $group: { _id: null, maxNum: { $max: '$num' } } }
+    ]);
+
+    let maxNumber = result[0]?.maxNum || 0;
+
+    // Also check the old single `proforma` field
+    const singleProformaResult = await Lead.aggregate([
+      {
+        $match: {
+          'proforma.number': { $regex: `^${prefix}-${year}/` }
+        }
+      },
+      {
+        $project: {
+          num: {
+            $toInt: {
+              $arrayElemAt: [
+                { $split: ['$proforma.number', '/'] },
+                1
+              ]
+            }
+          }
+        }
+      },
+      { $group: { _id: null, maxNum: { $max: '$num' } } }
+    ]);
+
+    if (singleProformaResult[0]?.maxNum > maxNumber) {
+      maxNumber = singleProformaResult[0].maxNum;
+    }
+
+    const nextNumber = maxNumber + 1;
+    const proformaNumber = `${prefix}-${year}/${String(nextNumber).padStart(4, '0')}`;
+
+    // ============================================
+    // ✅ CRITICAL: Preserve existing incentives
+    // ============================================
+    const existingTotalIncentive = lead.totalIncentive || 0;
+    const existingTotalProfit = lead.totalProfit || 0;
+    const existingTotalValue = lead.totalValue || 0;
+    const existingIncentive = lead.incentive || 0;
+    const existingProfit = lead.profit || 0;
+    const existingValue = lead.value || 0;
 
     const newProforma = {
       number: proformaNumber,
       sentDate: new Date(),
       amount: finalTotal,
-      type: type,
-      taxType: taxType,
+      type,
+      taxType,
       poNumber: poNumber || '',
       items: proformaItems,
-      subtotal: subtotal,
-      tax: tax,
+      subtotal,
+      tax,
       total: finalTotal,
       validUntil: validUntil ? new Date(validUntil) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      paymentTerms: paymentTerms || '100% Advance',
-      deliveryTerms: deliveryTerms || '3-5 working days after payment',
-      placeOfSupply: placeOfSupply || 'Gujarat (24)',
-      notes: notes || '',
-      terms: terms || 'This is a proforma invoice. Prices are valid for 7 days.',
+      paymentTerms,
+      deliveryTerms,
+      placeOfSupply,
+      notes,
+      terms,
       document: `Proforma ${proformaNumber}`,
       totalInWords: totalInWords || `${type === 'domestic' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(finalTotal)} Only`,
-      
       portOfLoading,
       portOfDischarge,
       destinationCountry,
@@ -308,14 +385,17 @@ exports.generateProforma = async (req, res) => {
       countryOfOriginGoods,
       totalBoxes,
       shippingMark,
-      vesselNo
+      vesselNo,
+      convertedToInvoice: false,
+      invoiceNumber: '',
+      incentive: 0,
+      profit: 0,
+      conversionDate: null
     };
 
-    if (!lead.proformas) {
-      lead.proformas = [];
-    }
+    if (!lead.proformas) lead.proformas = [];
     lead.proformas.push(newProforma);
-    lead.proforma = newProforma;
+    lead.proforma = newProforma; // keep latest reference
 
     lead.status = 'proforma_sent';
     lead.quotation = {
@@ -326,12 +406,23 @@ exports.generateProforma = async (req, res) => {
       notes: `Proforma ${proformaNumber} sent`
     };
 
+    // ✅ FORCE skip the pre-save auto-calculate
+    lead._skipAutoCalculate = true;
+
+    // ✅ Restore the previously earned incentives
+    lead.totalIncentive = existingTotalIncentive;
+    lead.totalProfit = existingTotalProfit;
+    lead.totalValue = existingTotalValue;
+    lead.incentive = existingIncentive;
+    lead.profit = existingProfit;
+    lead.value = existingValue;
+
     await lead.save();
     await lead.populate('assignedTo', 'name email');
 
     const proformaData = {
       ...newProforma,
-      lead: lead,
+      lead,
       customer: {
         name: lead.name,
         phone: lead.phone,
@@ -359,7 +450,7 @@ exports.generateProforma = async (req, res) => {
 };
 
 // ============================================
-// ✅ CONVERT PROFORMA TO INVOICE (WITH INCENTIVE)
+// ✅ CONVERT PROFORMA TO INVOICE - COMPLETE FIXED
 // ============================================
 exports.convertProformaToInvoice = async (req, res) => {
   try {
@@ -368,210 +459,773 @@ exports.convertProformaToInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    const proforma = lead.proforma;
-    if (!proforma || !proforma.number) {
-      return res.status(400).json({
-        success: false,
-        message: '⚠️ No proforma found for this lead. Please generate proforma first.'
-      });
-    }
+    // ✅ Get the specific proforma to convert from request body
+    const { proformaNumber, force = false } = req.body;
+    console.log(`🔄 Converting proforma: ${proformaNumber}, Force: ${force}`);
 
-    const existingInvoice = await Invoice.findOne({ proformaNumber: proforma.number });
-    if (existingInvoice) {
-      return res.status(400).json({
-        success: false,
-        message: `⚠️ Invoice already exists for proforma ${proforma.number}`
-      });
-    }
+    let proforma = null;
+    let proformaIndex = -1;
 
-    let totalIncentive = 0;
-    let totalProfit = 0;
-    let totalValue = 0;
-    let totalCost = 0;
-    let overallProfitPercentage = 0;
-
-    const invoiceItems = proforma.items.map(item => {
-      const quantity = item.quantity || 1;
-      const sellingPrice = item.sellingPrice || item.rate || 0;
-      const costPrice = item.costPrice || 0;
-      
-      const totalValueItem = sellingPrice * quantity;
-      const totalCostItem = costPrice * quantity;
-      const profitAmountItem = totalValueItem - totalCostItem;
-      const profitPercentageItem = totalCostItem > 0 ? (profitAmountItem / totalCostItem) * 100 : 0;
-      
-      const incentive = calculateIncentive(totalValueItem, profitPercentageItem);
-
-      totalIncentive += incentive;
-      totalProfit += profitAmountItem;
-      totalValue += totalValueItem;
-      totalCost += totalCostItem;
-
-      return {
-        description: item.productName || item.description || 'Product',
-        quantity: item.quantity,
-        rate: item.rate || item.sellingPrice || 0,
-        taxRate: item.taxRate || 18,
-        amount: item.total || (item.quantity * (item.rate || item.sellingPrice || 0)),
-        batch: item.batch || '',
-        hsCode: item.hsCode || '',
-        mfgDate: item.mfgDate || '',
-        expiryDate: item.expiryDate || '',
-        unit: item.unit || 'Vial',
-        countryOfOrigin: item.countryOfOrigin || 'India',
-        costPrice: costPrice,
-        sellingPrice: sellingPrice,
-        profitAmount: profitAmountItem,
-        profitPercentage: profitPercentageItem,
-        incentive: incentive
-      };
-    });
-
-    overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
-
-    lead._skipAutoCalculate = true;
-
-    lead.totalIncentive = totalIncentive;
-    lead.totalProfit = totalProfit;
-    lead.totalValue = totalValue;
-    lead.incentive = totalIncentive;
-    lead.profit = totalProfit;
-    lead.value = totalValue;
-
-    if (lead.items && lead.items.length > 0) {
-      lead.items.forEach((item, index) => {
-        if (invoiceItems[index]) {
-          item.incentive = invoiceItems[index].incentive || 0;
-          item.profitAmount = invoiceItems[index].profitAmount || 0;
-          item.profitPercentage = invoiceItems[index].profitPercentage || 0;
-        }
-      });
-    }
-
-    const year = new Date().getFullYear();
-    const invoiceCount = await Invoice.countDocuments();
-    const invoiceNumber = `MPDMS${year}/${String(invoiceCount + 1).padStart(3, '0')}`;
-
-    const invoiceData = {
-      invoiceNumber,
-      type: proforma.type || 'domestic',
-      date: new Date().toISOString().split('T')[0],
-      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      placeOfSupply: proforma.placeOfSupply || 'Gujarat (24)',
-      paymentTerms: proforma.paymentTerms || '100% Advance',
-
-      customer: {
-        name: lead.name,
-        phone: lead.phone,
-        email: lead.email || '',
-        address: lead.address || 'N/A',
-        gst: lead.gst || '',
-        drugLicense: lead.drugLicense || '',
-        state: lead.state || '',
-        stateCode: lead.stateCode || ''
-      },
-
-      items: invoiceItems,
-
-      subtotal: proforma.subtotal || 0,
-      tax: proforma.tax || 0,
-      total: proforma.total || 0,
-      rounding: 0,
-      totalInWords: proforma.totalInWords || '',
-
-      notes: proforma.notes || 'Thanks for your business.',
-      terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
-
-      portOfLoading: proforma.portOfLoading || '',
-      portOfDischarge: proforma.portOfDischarge || '',
-      destinationCountry: proforma.destinationCountry || '',
-      grossWeight: proforma.grossWeight || '',
-      netWeight: proforma.netWeight || '',
-      volumetricWeight: proforma.volumetricWeight || '',
-      countryOfOriginGoods: proforma.countryOfOriginGoods || 'India',
-      totalBoxes: proforma.totalBoxes || '',
-
-      proformaNumber: proforma.number,
-      leadId: lead._id,
-
-      status: 'draft',
-      createdBy: req.user.id,
-      
-      incentive: totalIncentive,
-      profit: totalProfit,
-      profitPercentage: overallProfitPercentage,
-      assignedTo: lead.assignedTo?._id || lead.assignedTo,
-      assignedToName: lead.assignedToName || lead.assignedTo?.name || 'Unassigned',
-      totalValue: totalValue,
-      totalCost: totalCost
-    };
-
-    const invoice = new Invoice(invoiceData);
-    await invoice.save();
-
-    lead.status = 'converted';
-    lead.conversionDate = new Date();
-    
-    lead.statusHistory.push({
-      status: 'converted',
-      date: new Date(),
-      notes: `✅ Converted to invoice ${invoiceNumber} | Incentive: ₹${totalIncentive.toFixed(2)} | Profit: ${overallProfitPercentage.toFixed(2)}%`,
-      updatedBy: req.user.id
-    });
-
-    await lead.save();
-    await lead.populate('assignedTo', 'name email');
-
-    if (lead.assignedTo) {
-      try {
-        const salesman = await User.findById(lead.assignedTo._id);
-        if (salesman) {
-          salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
-          salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
-          salesman.totalConversions = (salesman.totalConversions || 0) + 1;
-          salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
-          
-          if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
-          salesman.incentiveHistory.push({
-            leadId: lead._id,
-            leadName: lead.name,
-            invoiceNumber: invoiceNumber,
-            amount: totalIncentive,
-            value: totalValue,
-            profit: totalProfit,
-            profitPercentage: overallProfitPercentage,
-            date: new Date(),
-            status: 'credited'
-          });
-          
-          await salesman.save();
-          console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
-        }
-      } catch (err) {
-        console.error('Error updating salesman incentive:', err);
+    // ✅ If proformaNumber is provided, find that specific proforma
+    if (proformaNumber) {
+      proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
+      if (proformaIndex !== -1) {
+        proforma = lead.proformas[proformaIndex];
+      }
+      if (!proforma && lead.proforma && lead.proforma.number === proformaNumber) {
+        proforma = lead.proforma;
+        proformaIndex = -2;
       }
     }
 
-    await invoice.populate('createdBy', 'name');
-
-    res.status(201).json({
-      success: true,
-      data: {
-        invoice,
-        lead: lead,
-        incentive: {
-          total: totalIncentive,
-          profit: totalProfit,
-          value: totalValue,
-          profitPercentage: overallProfitPercentage,
-          salesman: lead.assignedTo?.name || lead.assignedToName || 'Unassigned'
+    // ✅ If no specific proforma, use first unconverted
+    if (!proforma) {
+      for (let i = 0; i < lead.proformas.length; i++) {
+        if (!lead.proformas[i].convertedToInvoice) {
+          proformaIndex = i;
+          proforma = lead.proformas[i];
+          break;
         }
-      },
-      message: `✅ Invoice ${invoiceNumber} created from proforma ${proforma.number} | Incentive: ₹${totalIncentive.toFixed(2)}`
-    });
+      }
+      if (!proforma && lead.proforma && !lead.proforma.convertedToInvoice) {
+        proforma = lead.proforma;
+        proformaIndex = -2;
+      }
+    }
+
+    // ✅ If still no proforma, use latest
+    if (!proforma) {
+      if (lead.proformas && lead.proformas.length > 0) {
+        proformaIndex = lead.proformas.length - 1;
+        proforma = lead.proformas[proformaIndex];
+      } else if (lead.proforma) {
+        proforma = lead.proforma;
+        proformaIndex = -2;
+      }
+    }
+
+    if (!proforma || !proforma.number) {
+      return res.status(400).json({
+        success: false,
+        message: '⚠️ No proforma found for this lead.'
+      });
+    }
+
+    // ✅ Check for existing invoice
+    const existingInvoice = await Invoice.findOne({ proformaNumber: proforma.number });
+    
+    // ✅ If invoice exists and NOT force mode, return 409
+    if (existingInvoice && !force) {
+      return res.status(409).json({
+        success: false,
+        message: `⚠️ Invoice already exists for proforma ${proforma.number}`,
+        canForce: true,
+        existingInvoice: {
+          number: existingInvoice.invoiceNumber,
+          customer: existingInvoice.customer?.name || 'Unknown',
+          total: existingInvoice.total
+        },
+        proformaNumber: proforma.number
+      });
+    }
+
+    // ✅ If invoice exists and force mode is ON, delete it
+    if (existingInvoice && force) {
+      console.log(`🔄 Force mode: Deleting existing invoice ${existingInvoice.invoiceNumber}`);
+      
+      // Reverse incentive from salesman
+      if (existingInvoice.assignedTo && existingInvoice.incentive > 0) {
+        try {
+          const salesman = await User.findById(existingInvoice.assignedTo);
+          if (salesman) {
+            const historyIndex = salesman.incentiveHistory.findIndex(
+              h => h.invoiceNumber === existingInvoice.invoiceNumber
+            );
+            if (historyIndex !== -1) {
+              salesman.incentiveHistory.splice(historyIndex, 1);
+            }
+            salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - (existingInvoice.incentive || 0));
+            salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - (existingInvoice.totalValue || 0));
+            salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
+            salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - (existingInvoice.profit || 0));
+            await salesman.save();
+            console.log(`✅ Incentive reversed from salesman ${salesman.name}`);
+          }
+        } catch (err) {
+          console.error('Error reversing incentive:', err);
+        }
+      }
+      
+      // ✅ Delete the invoice
+      await existingInvoice.deleteOne();
+      console.log(`🗑️ Deleted existing invoice ${existingInvoice.invoiceNumber}`);
+      
+      // ✅ Reset the proforma flag in the lead
+      if (proformaIndex >= 0 && proformaIndex < lead.proformas.length) {
+        lead.proformas[proformaIndex].convertedToInvoice = false;
+        lead.proformas[proformaIndex].invoiceNumber = '';
+        lead.proformas[proformaIndex].conversionDate = null;
+      } else if (proformaIndex === -2 && lead.proforma) {
+        lead.proforma.convertedToInvoice = false;
+        lead.proforma.invoiceNumber = '';
+        lead.proforma.conversionDate = null;
+      }
+      
+      // ✅ Save the lead with reset flags
+      await lead.save();
+      console.log(`✅ Lead proforma flags reset`);
+      
+      // ✅ IMPORTANT: Re-fetch the lead to get fresh data after save
+      const refreshedLead = await Lead.findById(req.params.id).populate('assignedTo', 'name email role');
+      if (!refreshedLead) {
+        return res.status(404).json({ success: false, message: 'Lead not found after refresh' });
+      }
+      
+      // ✅ Update references to use refreshed lead data
+      const updatedLead = refreshedLead;
+      
+      // ✅ Find the proforma again in the refreshed lead
+      let refreshedProforma = null;
+      let refreshedProformaIndex = -1;
+      
+      if (proformaNumber) {
+        refreshedProformaIndex = updatedLead.proformas.findIndex(p => p.number === proformaNumber);
+        if (refreshedProformaIndex !== -1) {
+          refreshedProforma = updatedLead.proformas[refreshedProformaIndex];
+        }
+        if (!refreshedProforma && updatedLead.proforma && updatedLead.proforma.number === proformaNumber) {
+          refreshedProforma = updatedLead.proforma;
+          refreshedProformaIndex = -2;
+        }
+      }
+      
+      if (!refreshedProforma) {
+        // If not found by number, use the one that was just reset
+        if (updatedLead.proformas && updatedLead.proformas.length > 0) {
+          refreshedProformaIndex = updatedLead.proformas.length - 1;
+          refreshedProforma = updatedLead.proformas[refreshedProformaIndex];
+        } else if (updatedLead.proforma) {
+          refreshedProforma = updatedLead.proforma;
+          refreshedProformaIndex = -2;
+        }
+      }
+      
+      if (!refreshedProforma || !refreshedProforma.number) {
+        return res.status(400).json({
+          success: false,
+          message: '⚠️ Proforma not found after refresh.'
+        });
+      }
+      
+      // ✅ Use the refreshed data for the rest of the process
+      const finalLead = updatedLead;
+      const finalProforma = refreshedProforma;
+      const finalProformaIndex = refreshedProformaIndex;
+      
+      // ✅ Check if proforma was already converted (double-check after refresh)
+      if (finalProforma.convertedToInvoice) {
+        return res.status(409).json({
+          success: false,
+          message: `⚠️ Proforma ${finalProforma.number} is already converted to invoice ${finalProforma.invoiceNumber}`,
+          existingInvoice: finalProforma.invoiceNumber,
+          proformaNumber: finalProforma.number
+        });
+      }
+
+      // ============================================
+      // ✅ GENERATE UNIQUE INVOICE NUMBER
+      // ============================================
+      const year = new Date().getFullYear();
+      const lastInvoice = await Invoice.findOne({
+        invoiceNumber: { $regex: `MPDMS${year}/` }
+      }).sort({ invoiceNumber: -1 });
+      
+      let nextNumber = 1;
+      if (lastInvoice) {
+        const parts = lastInvoice.invoiceNumber.split('/');
+        if (parts.length === 2) {
+          const num = parseInt(parts[1]);
+          if (!isNaN(num)) nextNumber = num + 1;
+        }
+      }
+      
+      let invoiceNumber = `MPDMS${year}/${String(nextNumber).padStart(3, '0')}`;
+      let existingWithNumber = await Invoice.findOne({ invoiceNumber });
+      while (existingWithNumber) {
+        nextNumber++;
+        invoiceNumber = `MPDMS${year}/${String(nextNumber).padStart(3, '0')}`;
+        existingWithNumber = await Invoice.findOne({ invoiceNumber });
+      }
+
+      // ============================================
+      // ✅ CALCULATE INCENTIVE
+      // ============================================
+      let totalIncentive = 0;
+      let totalProfit = 0;
+      let totalValue = 0;
+      let totalCost = 0;
+      let overallProfitPercentage = 0;
+
+      const invoiceItems = finalProforma.items.map(item => {
+        const quantity = item.quantity || 1;
+        const sellingPrice = item.sellingPrice || item.rate || 0;
+        const costPrice = item.costPrice || 0;
+        
+        const totalValueItem = sellingPrice * quantity;
+        const totalCostItem = costPrice * quantity;
+        const profitAmountItem = totalValueItem - totalCostItem;
+        const profitPercentageItem = totalCostItem > 0 ? (profitAmountItem / totalCostItem) * 100 : 0;
+        const incentive = calculateIncentive(totalValueItem, profitPercentageItem);
+
+        totalIncentive += incentive;
+        totalProfit += profitAmountItem;
+        totalValue += totalValueItem;
+        totalCost += totalCostItem;
+
+        return {
+          description: item.productName || item.description || 'Product',
+          quantity: item.quantity,
+          rate: item.rate || item.sellingPrice || 0,
+          taxRate: item.taxRate || 18,
+          amount: item.total || (item.quantity * (item.rate || item.sellingPrice || 0)),
+          batch: item.batch || '',
+          hsCode: item.hsCode || '',
+          mfgDate: item.mfgDate || '',
+          expiryDate: item.expiryDate || '',
+          unit: item.unit || 'Vial',
+          countryOfOrigin: item.countryOfOrigin || 'India',
+          costPrice: costPrice,
+          sellingPrice: sellingPrice,
+          profitAmount: profitAmountItem,
+          profitPercentage: profitPercentageItem,
+          incentive: incentive
+        };
+      });
+
+      overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+      // ============================================
+      // ✅ CREATE INVOICE
+      // ============================================
+      const invoiceData = {
+        invoiceNumber,
+        type: finalProforma.type || 'domestic',
+        date: new Date().toISOString().split('T')[0],
+        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        placeOfSupply: finalProforma.placeOfSupply || 'Gujarat (24)',
+        paymentTerms: finalProforma.paymentTerms || '100% Advance',
+        customer: {
+          name: finalLead.name,
+          phone: finalLead.phone,
+          email: finalLead.email || '',
+          address: finalLead.address || 'N/A',
+          gst: finalLead.gst || '',
+          drugLicense: finalLead.drugLicense || '',
+          state: finalLead.state || '',
+          stateCode: finalLead.stateCode || ''
+        },
+        items: invoiceItems,
+        subtotal: finalProforma.subtotal || 0,
+        tax: finalProforma.tax || 0,
+        total: finalProforma.total || 0,
+        rounding: 0,
+        totalInWords: finalProforma.totalInWords || '',
+        notes: finalProforma.notes || 'Thanks for your business.',
+        terms: finalProforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
+        portOfLoading: finalProforma.portOfLoading || '',
+        portOfDischarge: finalProforma.portOfDischarge || '',
+        destinationCountry: finalProforma.destinationCountry || '',
+        grossWeight: finalProforma.grossWeight || '',
+        netWeight: finalProforma.netWeight || '',
+        volumetricWeight: finalProforma.volumetricWeight || '',
+        countryOfOriginGoods: finalProforma.countryOfOriginGoods || 'India',
+        totalBoxes: finalProforma.totalBoxes || '',
+        proformaNumber: finalProforma.number,
+        leadId: finalLead._id,
+        status: 'draft',
+        createdBy: req.user.id,
+        incentive: totalIncentive,
+        profit: totalProfit,
+        profitPercentage: overallProfitPercentage,
+        assignedTo: finalLead.assignedTo?._id || finalLead.assignedTo,
+        assignedToName: finalLead.assignedToName || finalLead.assignedTo?.name || 'Unassigned',
+        totalValue: totalValue,
+        totalCost: totalCost
+      };
+
+      const invoice = new Invoice(invoiceData);
+      await invoice.save();
+      console.log(`✅ Invoice ${invoiceNumber} created successfully`);
+
+      // ============================================
+      // ✅ UPDATE LEAD
+      // ============================================
+      finalLead._skipAutoCalculate = true;
+
+      // Update proforma
+      if (finalProformaIndex >= 0) {
+        finalLead.proformas[finalProformaIndex].incentive = totalIncentive;
+        finalLead.proformas[finalProformaIndex].profit = totalProfit;
+        finalLead.proformas[finalProformaIndex].convertedToInvoice = true;
+        finalLead.proformas[finalProformaIndex].invoiceNumber = invoiceNumber;
+        finalLead.proformas[finalProformaIndex].conversionDate = new Date();
+      } else if (finalProformaIndex === -2) {
+        finalLead.proforma.incentive = totalIncentive;
+        finalLead.proforma.profit = totalProfit;
+        finalLead.proforma.convertedToInvoice = true;
+        finalLead.proforma.invoiceNumber = invoiceNumber;
+        finalLead.proforma.conversionDate = new Date();
+      }
+
+      // Update lead totals - sum all converted proformas
+      let totalLeadIncentive = 0;
+      let totalLeadProfit = 0;
+      let totalLeadValue = 0;
+      
+      finalLead.proformas.forEach(p => {
+        if (p.convertedToInvoice) {
+          totalLeadIncentive += p.incentive || 0;
+          totalLeadProfit += p.profit || 0;
+          totalLeadValue += p.total || 0;
+        }
+      });
+      
+      finalLead.totalIncentive = totalLeadIncentive;
+      finalLead.totalProfit = totalLeadProfit;
+      finalLead.totalValue = totalLeadValue;
+      finalLead.incentive = totalLeadIncentive;
+      finalLead.profit = totalLeadProfit;
+      finalLead.value = totalLeadValue;
+
+      // Update status
+      if (finalLead.status !== 'converted') {
+        finalLead.status = 'converted';
+        finalLead.conversionDate = new Date();
+        finalLead.statusHistory.push({
+          status: 'converted',
+          date: new Date(),
+          notes: `✅ Converted proforma ${finalProforma.number} to invoice ${invoiceNumber}`,
+          updatedBy: req.user.id
+        });
+      }
+
+      await finalLead.save();
+      await finalLead.populate('assignedTo', 'name email');
+      console.log(`✅ Lead ${finalLead.name} updated to converted status`);
+
+      // ============================================
+      // ✅ CREDIT INCENTIVE TO SALESMAN
+      // ============================================
+      if (finalLead.assignedTo && totalIncentive > 0) {
+        try {
+          const salesman = await User.findById(finalLead.assignedTo._id);
+          if (salesman) {
+            const existingHistory = salesman.incentiveHistory?.find(
+              h => h.invoiceNumber === invoiceNumber
+            );
+            if (!existingHistory) {
+              salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
+              salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
+              salesman.totalConversions = (salesman.totalConversions || 0) + 1;
+              salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
+              
+              if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
+              salesman.incentiveHistory.push({
+                leadId: finalLead._id,
+                leadName: finalLead.name,
+                proformaNumber: finalProforma.number,
+                invoiceNumber: invoiceNumber,
+                amount: totalIncentive,
+                value: totalValue,
+                profit: totalProfit,
+                profitPercentage: overallProfitPercentage,
+                date: new Date(),
+                status: 'credited'
+              });
+              
+              await salesman.save();
+              console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+            }
+          }
+        } catch (err) {
+          console.error('Error updating salesman incentive:', err);
+        }
+      }
+
+      await invoice.populate('createdBy', 'name');
+
+      // ✅ Response
+      const responseData = {
+        success: true,
+        data: {
+          invoice,
+          lead: finalLead,
+          proformaIncentive: {
+            amount: totalIncentive,
+            profit: totalProfit,
+            value: totalValue,
+            profitPercentage: overallProfitPercentage,
+            proformaNumber: finalProforma.number
+          },
+          cumulativeIncentive: {
+            total: finalLead.totalIncentive,
+            profit: finalLead.totalProfit,
+            value: finalLead.totalValue,
+            salesman: finalLead.assignedTo?.name || finalLead.assignedToName || 'Unassigned'
+          }
+        },
+        message: `✅ Invoice ${invoiceNumber} created from proforma ${finalProforma.number} | Incentive: ₹${totalIncentive.toFixed(2)}`
+      };
+
+      if (force) {
+        responseData.forceCreated = true;
+        responseData.message += ` (Overwrote previous invoice)`;
+      }
+
+      res.status(201).json(responseData);
+
+    } else {
+      // ✅ Normal flow (no existing invoice)
+      
+      // ✅ Check if proforma already converted
+      if (proforma.convertedToInvoice) {
+        return res.status(409).json({
+          success: false,
+          message: `⚠️ Proforma ${proforma.number} is already converted to invoice ${proforma.invoiceNumber}`,
+          existingInvoice: proforma.invoiceNumber,
+          proformaNumber: proforma.number
+        });
+      }
+
+      // ============================================
+      // ✅ GENERATE UNIQUE INVOICE NUMBER
+      // ============================================
+      const year = new Date().getFullYear();
+      const lastInvoice = await Invoice.findOne({
+        invoiceNumber: { $regex: `MPDMS${year}/` }
+      }).sort({ invoiceNumber: -1 });
+      
+      let nextNumber = 1;
+      if (lastInvoice) {
+        const parts = lastInvoice.invoiceNumber.split('/');
+        if (parts.length === 2) {
+          const num = parseInt(parts[1]);
+          if (!isNaN(num)) nextNumber = num + 1;
+        }
+      }
+      
+      let invoiceNumber = `MPDMS${year}/${String(nextNumber).padStart(3, '0')}`;
+      let existingWithNumber = await Invoice.findOne({ invoiceNumber });
+      while (existingWithNumber) {
+        nextNumber++;
+        invoiceNumber = `MPDMS${year}/${String(nextNumber).padStart(3, '0')}`;
+        existingWithNumber = await Invoice.findOne({ invoiceNumber });
+      }
+
+      // ============================================
+      // ✅ CALCULATE INCENTIVE
+      // ============================================
+      let totalIncentive = 0;
+      let totalProfit = 0;
+      let totalValue = 0;
+      let totalCost = 0;
+      let overallProfitPercentage = 0;
+
+      const invoiceItems = proforma.items.map(item => {
+        const quantity = item.quantity || 1;
+        const sellingPrice = item.sellingPrice || item.rate || 0;
+        const costPrice = item.costPrice || 0;
+        
+        const totalValueItem = sellingPrice * quantity;
+        const totalCostItem = costPrice * quantity;
+        const profitAmountItem = totalValueItem - totalCostItem;
+        const profitPercentageItem = totalCostItem > 0 ? (profitAmountItem / totalCostItem) * 100 : 0;
+        const incentive = calculateIncentive(totalValueItem, profitPercentageItem);
+
+        totalIncentive += incentive;
+        totalProfit += profitAmountItem;
+        totalValue += totalValueItem;
+        totalCost += totalCostItem;
+
+        return {
+          description: item.productName || item.description || 'Product',
+          quantity: item.quantity,
+          rate: item.rate || item.sellingPrice || 0,
+          taxRate: item.taxRate || 18,
+          amount: item.total || (item.quantity * (item.rate || item.sellingPrice || 0)),
+          batch: item.batch || '',
+          hsCode: item.hsCode || '',
+          mfgDate: item.mfgDate || '',
+          expiryDate: item.expiryDate || '',
+          unit: item.unit || 'Vial',
+          countryOfOrigin: item.countryOfOrigin || 'India',
+          costPrice: costPrice,
+          sellingPrice: sellingPrice,
+          profitAmount: profitAmountItem,
+          profitPercentage: profitPercentageItem,
+          incentive: incentive
+        };
+      });
+
+      overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+      // ============================================
+      // ✅ CREATE INVOICE
+      // ============================================
+      const invoiceData = {
+        invoiceNumber,
+        type: proforma.type || 'domestic',
+        date: new Date().toISOString().split('T')[0],
+        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        placeOfSupply: proforma.placeOfSupply || 'Gujarat (24)',
+        paymentTerms: proforma.paymentTerms || '100% Advance',
+        customer: {
+          name: lead.name,
+          phone: lead.phone,
+          email: lead.email || '',
+          address: lead.address || 'N/A',
+          gst: lead.gst || '',
+          drugLicense: lead.drugLicense || '',
+          state: lead.state || '',
+          stateCode: lead.stateCode || ''
+        },
+        items: invoiceItems,
+        subtotal: proforma.subtotal || 0,
+        tax: proforma.tax || 0,
+        total: proforma.total || 0,
+        rounding: 0,
+        totalInWords: proforma.totalInWords || '',
+        notes: proforma.notes || 'Thanks for your business.',
+        terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
+        portOfLoading: proforma.portOfLoading || '',
+        portOfDischarge: proforma.portOfDischarge || '',
+        destinationCountry: proforma.destinationCountry || '',
+        grossWeight: proforma.grossWeight || '',
+        netWeight: proforma.netWeight || '',
+        volumetricWeight: proforma.volumetricWeight || '',
+        countryOfOriginGoods: proforma.countryOfOriginGoods || 'India',
+        totalBoxes: proforma.totalBoxes || '',
+        proformaNumber: proforma.number,
+        leadId: lead._id,
+        status: 'draft',
+        createdBy: req.user.id,
+        incentive: totalIncentive,
+        profit: totalProfit,
+        profitPercentage: overallProfitPercentage,
+        assignedTo: lead.assignedTo?._id || lead.assignedTo,
+        assignedToName: lead.assignedToName || lead.assignedTo?.name || 'Unassigned',
+        totalValue: totalValue,
+        totalCost: totalCost
+      };
+
+      const invoice = new Invoice(invoiceData);
+      await invoice.save();
+      console.log(`✅ Invoice ${invoiceNumber} created successfully`);
+
+      // ============================================
+      // ✅ UPDATE LEAD
+      // ============================================
+      lead._skipAutoCalculate = true;
+
+      // Update proforma
+      if (proformaIndex >= 0) {
+        lead.proformas[proformaIndex].incentive = totalIncentive;
+        lead.proformas[proformaIndex].profit = totalProfit;
+        lead.proformas[proformaIndex].convertedToInvoice = true;
+        lead.proformas[proformaIndex].invoiceNumber = invoiceNumber;
+        lead.proformas[proformaIndex].conversionDate = new Date();
+      } else if (proformaIndex === -2) {
+        lead.proforma.incentive = totalIncentive;
+        lead.proforma.profit = totalProfit;
+        lead.proforma.convertedToInvoice = true;
+        lead.proforma.invoiceNumber = invoiceNumber;
+        lead.proforma.conversionDate = new Date();
+      }
+
+      // Update lead totals - sum all converted proformas
+      let totalLeadIncentive = 0;
+      let totalLeadProfit = 0;
+      let totalLeadValue = 0;
+      
+      lead.proformas.forEach(p => {
+        if (p.convertedToInvoice) {
+          totalLeadIncentive += p.incentive || 0;
+          totalLeadProfit += p.profit || 0;
+          totalLeadValue += p.total || 0;
+        }
+      });
+      
+      lead.totalIncentive = totalLeadIncentive;
+      lead.totalProfit = totalLeadProfit;
+      lead.totalValue = totalLeadValue;
+      lead.incentive = totalLeadIncentive;
+      lead.profit = totalLeadProfit;
+      lead.value = totalLeadValue;
+
+      // Update status
+      if (lead.status !== 'converted') {
+        lead.status = 'converted';
+        lead.conversionDate = new Date();
+        lead.statusHistory.push({
+          status: 'converted',
+          date: new Date(),
+          notes: `✅ Converted proforma ${proforma.number} to invoice ${invoiceNumber}`,
+          updatedBy: req.user.id
+        });
+      }
+
+      await lead.save();
+      await lead.populate('assignedTo', 'name email');
+      console.log(`✅ Lead ${lead.name} updated to converted status`);
+
+      // ============================================
+      // ✅ CREDIT INCENTIVE TO SALESMAN
+      // ============================================
+      if (lead.assignedTo && totalIncentive > 0) {
+        try {
+          const salesman = await User.findById(lead.assignedTo._id);
+          if (salesman) {
+            const existingHistory = salesman.incentiveHistory?.find(
+              h => h.invoiceNumber === invoiceNumber
+            );
+            if (!existingHistory) {
+              salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
+              salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
+              salesman.totalConversions = (salesman.totalConversions || 0) + 1;
+              salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
+              
+              if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
+              salesman.incentiveHistory.push({
+                leadId: lead._id,
+                leadName: lead.name,
+                proformaNumber: proforma.number,
+                invoiceNumber: invoiceNumber,
+                amount: totalIncentive,
+                value: totalValue,
+                profit: totalProfit,
+                profitPercentage: overallProfitPercentage,
+                date: new Date(),
+                status: 'credited'
+              });
+              
+              await salesman.save();
+              console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+            }
+          }
+        } catch (err) {
+          console.error('Error updating salesman incentive:', err);
+        }
+      }
+
+      await invoice.populate('createdBy', 'name');
+
+      // ✅ Response
+      const responseData = {
+        success: true,
+        data: {
+          invoice,
+          lead: lead,
+          proformaIncentive: {
+            amount: totalIncentive,
+            profit: totalProfit,
+            value: totalValue,
+            profitPercentage: overallProfitPercentage,
+            proformaNumber: proforma.number
+          },
+          cumulativeIncentive: {
+            total: lead.totalIncentive,
+            profit: lead.totalProfit,
+            value: lead.totalValue,
+            salesman: lead.assignedTo?.name || lead.assignedToName || 'Unassigned'
+          }
+        },
+        message: `✅ Invoice ${invoiceNumber} created from proforma ${proforma.number} | Incentive: ₹${totalIncentive.toFixed(2)}`
+      };
+
+      res.status(201).json(responseData);
+    }
 
   } catch (error) {
     console.error('Convert proforma to invoice error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Server error during conversion'
+    });
+  }
+};
+
+exports.deleteProforma = async (req, res) => {
+  try {
+    const { id } = req.params;
+    // ✅ Use query param to avoid route conflict
+    const proformaNumber = req.query.proformaNumber;
+    
+    if (!proformaNumber) {
+      return res.status(400).json({
+        success: false,
+        message: '⚠️ Proforma number is required. Use ?proformaNumber=PF-2026/0001'
+      });
+    }
+    
+    console.log(`🗑️ Deleting proforma ${proformaNumber} for lead ${id}`);
+    
+    const lead = await Lead.findById(id);
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    // Find and remove the proforma from the array
+    const proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
+    
+    if (proformaIndex === -1) {
+      // Check if it's in the single proforma field
+      if (lead.proforma && lead.proforma.number === proformaNumber) {
+        // ✅ If it's the single proforma, clear it
+        lead.proforma = null;
+        if (lead.proformas.length === 0) {
+          lead.status = 'qualified';
+        }
+        await lead.save();
+        return res.json({
+          success: true,
+          message: `✅ Proforma ${proformaNumber} deleted successfully`
+        });
+      }
+      
+      return res.status(404).json({ 
+        success: false, 
+        message: `Proforma ${proformaNumber} not found` 
+      });
+    }
+
+    // Check if already converted
+    if (lead.proformas[proformaIndex].convertedToInvoice) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete proforma ${proformaNumber} as it has been converted to invoice ${lead.proformas[proformaIndex].invoiceNumber}`
+      });
+    }
+
+    // ✅ Remove the proforma
+    lead.proformas.splice(proformaIndex, 1);
+
+    // If there are no proformas left, update status
+    if (lead.proformas.length === 0) {
+      lead.status = 'qualified';
+      lead.proforma = null;
+    } else {
+      // Update the single proforma reference to the latest
+      lead.proforma = lead.proformas[lead.proformas.length - 1];
+    }
+
+    await lead.save();
+
+    res.json({
+      success: true,
+      message: `✅ Proforma ${proformaNumber} deleted successfully`
+    });
+  } catch (error) {
+    console.error('Delete proforma error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -627,7 +1281,10 @@ exports.getLeads = async (req, res) => {
             new: { $sum: { $cond: [{ $eq: ['$status', 'new'] }, 1, 0] } },
             contacted: { $sum: { $cond: [{ $eq: ['$status', 'contacted'] }, 1, 0] } },
             qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } },
-            proforma_sent: { $sum: { $cond: [{ $eq: ['$status', 'proforma_sent'] }, 1, 0] } }
+            proforma_sent: { $sum: { $cond: [{ $eq: ['$status', 'proforma_sent'] }, 1, 0] } },
+            order_confirmed: { $sum: { $cond: [{ $eq: ['$status', 'order_confirmed'] }, 1, 0] } },
+            payment_pending: { $sum: { $cond: [{ $eq: ['$status', 'payment_pending'] }, 1, 0] } },
+            lost: { $sum: { $cond: [{ $eq: ['$status', 'lost'] }, 1, 0] } }
           }
         }
       ]);
