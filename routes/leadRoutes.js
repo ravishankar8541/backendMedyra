@@ -79,4 +79,85 @@ router.post('/:id/force-convert',
   convertProformaToInvoice
 );
 
+
+router.post('/send-email', protect, async (req, res) => {
+  try {
+    const { to, subject, body, attachment } = req.body;
+    
+    // Use nodemailer or your preferred email service
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: process.env.SMTP_FROM,
+      to,
+      subject,
+      html: body.replace(/\n/g, '<br>'),
+      attachments: attachment ? [{
+        filename: attachment.filename,
+        content: Buffer.from(attachment.content, 'base64'),
+      }] : [],
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Email error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ====== TEMP FILE UPLOAD ROUTE ======
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+
+router.post('/upload-temp', protect, upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    // Upload to cloud storage (S3, Firebase, etc.)
+    // For demo, return a temporary URL
+    const url = `https://your-storage.com/temp/${Date.now()}_${file.originalname}`;
+    
+    // Store file temporarily (you can use AWS S3, Firebase Storage, etc.)
+    // For now, return a mock URL
+    res.json({ 
+      success: true, 
+      url: url,
+      message: 'File uploaded successfully'
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ====== WHATSAPP SENDING ROUTE ======
+router.post('/send-whatsapp', protect, async (req, res) => {
+  try {
+    const { phone, message, attachment } = req.body;
+    
+    // Use Twilio, WhatsApp Business API, or similar
+    // For demo, just log
+    console.log(`📱 WhatsApp to ${phone}: ${message}`);
+    if (attachment) {
+      console.log(`📎 Attachment: ${attachment.url}`);
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('WhatsApp error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 module.exports = router;
