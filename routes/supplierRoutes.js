@@ -10,10 +10,12 @@ const {
 } = require('../controllers/supplierController');
 const { protect, restrictTo } = require('../middleware/auth');
 
+// ===== VALIDATION RULES =====
 const supplierValidation = [
-  body('name').notEmpty().withMessage('Supplier name required'),
-  body('email').isEmail().withMessage('Valid email required'),
-  body('phone').notEmpty().withMessage('Phone number required')
+  body('companyName').notEmpty().withMessage('Company name is required'),
+  body('contactPerson').notEmpty().withMessage('Contact person is required'),
+  body('email').isEmail().withMessage('Valid email is required'),
+  body('phone').notEmpty().withMessage('Phone number is required')
 ];
 
 // ============================================
@@ -35,7 +37,7 @@ router.get('/:id', getSupplier);
 // CREATE SUPPLIER - Admin & Manager
 // ============================================
 router.post('/', 
-  restrictTo('admin', 'manager'),  // ✅ Added 'manager'
+  restrictTo('admin', 'manager'),
   supplierValidation, 
   createSupplier
 );
@@ -44,12 +46,12 @@ router.post('/',
 // UPDATE SUPPLIER - Admin & Manager
 // ============================================
 router.put('/:id', 
-  restrictTo('admin', 'manager'),  // ✅ Added 'manager'
+  restrictTo('admin', 'manager'),
   updateSupplier
 );
 
 // ============================================
-// DELETE SUPPLIER - Admin only (safety)
+// DELETE SUPPLIER - Admin only
 // ============================================
 router.delete('/:id', 
   restrictTo('admin'), 

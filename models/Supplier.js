@@ -1,52 +1,130 @@
 const mongoose = require('mongoose');
 
 const SupplierSchema = new mongoose.Schema({
-  name: {
+  // ===== BASIC INFORMATION =====
+  companyName: {
     type: String,
     required: true,
     trim: true
   },
-  contactPerson: String,
+  contactPerson: {
+    type: String,
+    required: true,
+    trim: true
+  },
   email: {
     type: String,
-    required: true
+    required: true,
+    trim: true,
+    lowercase: true
   },
   phone: {
     type: String,
-    required: true
+    required: true,
+    trim: true
   },
-  alternatePhone: String,
+  alternativePhone: {
+    type: String,
+    trim: true
+  },
+  website: {
+    type: String,
+    trim: true
+  },
+
+  // ===== ADDRESS =====
   address: {
-    street: String,
-    city: String,
-    state: String,
-    pincode: String,
-    country: String
+    street: { type: String, trim: true },
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    country: { type: String, default: 'Pakistan' },
+    postalCode: { type: String, trim: true }
   },
-  gst: String,
-  pan: String,
+
+  // ===== BUSINESS DETAILS =====
+  businessType: {
+    type: String,
+    enum: ['manufacturer', 'distributor', 'wholesaler', 'retailer', 'importer', 'exporter'],
+    default: 'distributor'
+  },
+  gstNumber: {
+    type: String,
+    trim: true
+  },
+  ntfnNumber: {
+    type: String,
+    trim: true
+  },
+  industry: {
+    type: String,
+    default: 'pharmaceutical'
+  },
+
+  // ===== BANK DETAILS =====
+  bankName: {
+    type: String,
+    trim: true
+  },
+  accountTitle: {
+    type: String,
+    trim: true
+  },
+  accountNumber: {
+    type: String,
+    trim: true
+  },
+  branchCode: {
+    type: String,
+    trim: true
+  },
+
+  // ===== PAYMENT TERMS =====
   paymentTerms: {
     type: String,
-    enum: ['Advance', 'Net 15', 'Net 30', 'Net 45', 'Net 60'],
-    default: 'Net 30'
+    enum: ['net_15', 'net_30', 'net_45', 'net_60', 'cod', 'advance', 'letter_of_credit'],
+    default: 'net_30'
   },
-  creditLimit: Number,
-  leadTime: String,
+  currency: {
+    type: String,
+    default: 'PKR'
+  },
+  creditLimit: {
+    type: Number,
+    default: 0
+  },
+  taxRate: {
+    type: Number,
+    default: 0
+  },
+  discountRate: {
+    type: Number,
+    default: 0
+  },
+  deliveryTime: {
+    type: String,
+    default: '3-5 days'
+  },
+
+  // ===== STATUS =====
+  status: {
+    type: String,
+    enum: ['active', 'inactive', 'pending'],
+    default: 'pending'
+  },
+  
+  // ===== NOTES =====
+  notes: {
+    type: String,
+    trim: true
+  },
+
+  // ===== TRACKING =====
   rating: {
     type: Number,
     min: 0,
     max: 5,
     default: 0
   },
-  status: {
-    type: String,
-    enum: ['active', 'inactive', 'pending'],
-    default: 'pending'
-  },
-  products: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Product'
-  }],
   totalOrders: {
     type: Number,
     default: 0
@@ -55,7 +133,6 @@ const SupplierSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  notes: String,
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -64,7 +141,9 @@ const SupplierSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Index for search
-SupplierSchema.index({ name: 'text', contactPerson: 'text' });
+// ===== INDEXES FOR SEARCH =====
+SupplierSchema.index({ companyName: 'text', contactPerson: 'text', email: 'text' });
+SupplierSchema.index({ status: 1 });
+SupplierSchema.index({ businessType: 1 });
 
 module.exports = mongoose.model('Supplier', SupplierSchema);

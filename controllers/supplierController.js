@@ -1,5 +1,4 @@
 const Supplier = require('../models/Supplier');
-const Product = require('../models/Product');
 
 // ============================================
 // CREATE SUPPLIER
@@ -9,9 +8,38 @@ exports.createSupplier = async (req, res) => {
     const supplierData = req.body;
     supplierData.createdBy = req.user.id;
 
-    console.log('📦 Creating supplier:', supplierData);
+    // ✅ Map frontend field names to backend schema
+    const mappedData = {
+      companyName: supplierData.companyName,
+      contactPerson: supplierData.contactPerson,
+      email: supplierData.email,
+      phone: supplierData.phone,
+      alternativePhone: supplierData.alternativePhone || '',
+      website: supplierData.website || '',
+      address: {
+        street: supplierData.address || '',
+        city: supplierData.city || '',
+        state: supplierData.state || '',
+        country: supplierData.country || 'Pakistan',
+        postalCode: supplierData.postalCode || ''
+      },
+      businessType: supplierData.businessType || 'distributor',
+      gstNumber: supplierData.gstNumber || '',
+      ntfnNumber: supplierData.ntfnNumber || '',
+      bankName: supplierData.bankName || '',
+      accountTitle: supplierData.accountTitle || '',
+      accountNumber: supplierData.accountNumber || '',
+      branchCode: supplierData.branchCode || '',
+      paymentTerms: supplierData.paymentTerms || 'net_30',
+      currency: supplierData.currency || 'PKR',
+      notes: supplierData.notes || '',
+      status: supplierData.status || 'active',
+      createdBy: req.user.id
+    };
 
-    const supplier = new Supplier(supplierData);
+    console.log('📦 Creating supplier with mapped data:', mappedData);
+
+    const supplier = new Supplier(mappedData);
     await supplier.save();
 
     console.log('✅ Supplier created:', supplier._id);
@@ -23,6 +51,15 @@ exports.createSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Create supplier error:', error);
+    
+    // Handle duplicate email error
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Supplier with this email already exists'
+      });
+    }
+
     res.status(500).json({ 
       success: false, 
       message: error.message,
@@ -36,22 +73,22 @@ exports.createSupplier = async (req, res) => {
 // ============================================
 exports.getSuppliers = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, search } = req.query;
+    const { page = 1, limit = 20, status, search } = req.query;
 
     const query = {};
     if (status && status !== 'all') query.status = status;
+    
     if (search) {
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
+        { companyName: { $regex: search, $options: 'i' } },
         { contactPerson: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { phone: { $regex: search, $options: 'i' } },
-        { gst: { $regex: search, $options: 'i' } }
+        { gstNumber: { $regex: search, $options: 'i' } }
       ];
     }
 
     const suppliers = await Supplier.find(query)
-      .populate('products', 'name sku')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
@@ -84,7 +121,6 @@ exports.getSuppliers = async (req, res) => {
 exports.getSupplier = async (req, res) => {
   try {
     const supplier = await Supplier.findById(req.params.id)
-      .populate('products', 'name sku pricing.sellingPrice')
       .populate('createdBy', 'name email');
 
     if (!supplier) {
@@ -153,12 +189,6 @@ exports.deleteSupplier = async (req, res) => {
         message: 'Supplier not found' 
       });
     }
-
-    // Remove supplier reference from products
-    await Product.updateMany(
-      { supplier: supplier._id },
-      { $unset: { supplier: '' } }
-    );
 
     await supplier.deleteOne();
     
