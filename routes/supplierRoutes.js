@@ -47,6 +47,7 @@ router.post('/',
 // ============================================
 router.put('/:id', 
   restrictTo('admin', 'manager'),
+  supplierValidation,
   updateSupplier
 );
 

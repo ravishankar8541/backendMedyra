@@ -461,7 +461,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     // ✅ Get the specific proforma to convert from request body
     const { proformaNumber, force = false } = req.body;
-    console.log(`🔄 Converting proforma: ${proformaNumber}, Force: ${force}`);
+  
 
     let proforma = null;
     let proformaIndex = -1;
@@ -531,7 +531,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     // ✅ If invoice exists and force mode is ON, delete it
     if (existingInvoice && force) {
-      console.log(`🔄 Force mode: Deleting existing invoice ${existingInvoice.invoiceNumber}`);
+      
       
       // Reverse incentive from salesman
       if (existingInvoice.assignedTo && existingInvoice.incentive > 0) {
@@ -549,7 +549,7 @@ exports.convertProformaToInvoice = async (req, res) => {
             salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
             salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - (existingInvoice.profit || 0));
             await salesman.save();
-            console.log(`✅ Incentive reversed from salesman ${salesman.name}`);
+           
           }
         } catch (err) {
           console.error('Error reversing incentive:', err);
@@ -558,7 +558,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       
       // ✅ Delete the invoice
       await existingInvoice.deleteOne();
-      console.log(`🗑️ Deleted existing invoice ${existingInvoice.invoiceNumber}`);
+     
       
       // ✅ Reset the proforma flag in the lead
       if (proformaIndex >= 0 && proformaIndex < lead.proformas.length) {
@@ -573,7 +573,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       
       // ✅ Save the lead with reset flags
       await lead.save();
-      console.log(`✅ Lead proforma flags reset`);
+      
       
       // ✅ IMPORTANT: Re-fetch the lead to get fresh data after save
       const refreshedLead = await Lead.findById(req.params.id).populate('assignedTo', 'name email role');
@@ -755,7 +755,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
       const invoice = new Invoice(invoiceData);
       await invoice.save();
-      console.log(`✅ Invoice ${invoiceNumber} created successfully`);
+      
 
       // ============================================
       // ✅ UPDATE LEAD
@@ -811,7 +811,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
       await finalLead.save();
       await finalLead.populate('assignedTo', 'name email');
-      console.log(`✅ Lead ${finalLead.name} updated to converted status`);
+    
 
       // ============================================
       // ✅ CREDIT INCENTIVE TO SALESMAN
@@ -844,7 +844,7 @@ exports.convertProformaToInvoice = async (req, res) => {
               });
               
               await salesman.save();
-              console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+              
             }
           }
         } catch (err) {
@@ -1020,7 +1020,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
       const invoice = new Invoice(invoiceData);
       await invoice.save();
-      console.log(`✅ Invoice ${invoiceNumber} created successfully`);
+     
 
       // ============================================
       // ✅ UPDATE LEAD
@@ -1076,7 +1076,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
       await lead.save();
       await lead.populate('assignedTo', 'name email');
-      console.log(`✅ Lead ${lead.name} updated to converted status`);
+      
 
       // ============================================
       // ✅ CREDIT INCENTIVE TO SALESMAN
@@ -1109,7 +1109,7 @@ exports.convertProformaToInvoice = async (req, res) => {
               });
               
               await salesman.save();
-              console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+              
             }
           }
         } catch (err) {
@@ -1167,7 +1167,7 @@ exports.deleteProforma = async (req, res) => {
       });
     }
     
-    console.log(`🗑️ Deleting proforma ${proformaNumber} for lead ${id}`);
+    
     
     const lead = await Lead.findById(id);
     if (!lead) {

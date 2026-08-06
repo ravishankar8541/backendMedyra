@@ -1,41 +1,50 @@
 const Supplier = require('../models/Supplier');
 
 // ============================================
+// HELPER: Map frontend data to backend schema
+// ============================================
+const mapFrontendToBackend = (data) => {
+  return {
+    companyName: data.companyName,
+    contactPerson: data.contactPerson,
+    email: data.email,
+    phone: data.phone,
+    alternativePhone: data.alternativePhone || '',
+    website: data.website || '',
+    address: {
+      street: data.address || '',
+      city: data.city || '',
+      state: data.state || '',
+      country: data.country || 'Pakistan',
+      postalCode: data.postalCode || ''
+    },
+    businessType: data.businessType || 'distributor',
+    gstNumber: data.gstNumber || '',
+    ntfnNumber: data.ntfnNumber || '',
+    bankName: data.bankName || '',
+    accountTitle: data.accountTitle || '',
+    accountNumber: data.accountNumber || '',
+    branchCode: data.branchCode || '',
+    paymentTerms: data.paymentTerms || 'net_30',
+    currency: data.currency || 'PKR',
+    notes: data.notes || '',
+    status: data.status || 'active',
+    creditLimit: data.creditLimit || 0,
+    taxRate: data.taxRate || 0,
+    discountRate: data.discountRate || 0,
+    deliveryTime: data.deliveryTime || '3-5 days',
+    industry: data.industry || 'pharmaceutical'
+  };
+};
+
+// ============================================
 // CREATE SUPPLIER
 // ============================================
 exports.createSupplier = async (req, res) => {
   try {
-    const supplierData = req.body;
-    supplierData.createdBy = req.user.id;
-
-    // ✅ Map frontend field names to backend schema
-    const mappedData = {
-      companyName: supplierData.companyName,
-      contactPerson: supplierData.contactPerson,
-      email: supplierData.email,
-      phone: supplierData.phone,
-      alternativePhone: supplierData.alternativePhone || '',
-      website: supplierData.website || '',
-      address: {
-        street: supplierData.address || '',
-        city: supplierData.city || '',
-        state: supplierData.state || '',
-        country: supplierData.country || 'Pakistan',
-        postalCode: supplierData.postalCode || ''
-      },
-      businessType: supplierData.businessType || 'distributor',
-      gstNumber: supplierData.gstNumber || '',
-      ntfnNumber: supplierData.ntfnNumber || '',
-      bankName: supplierData.bankName || '',
-      accountTitle: supplierData.accountTitle || '',
-      accountNumber: supplierData.accountNumber || '',
-      branchCode: supplierData.branchCode || '',
-      paymentTerms: supplierData.paymentTerms || 'net_30',
-      currency: supplierData.currency || 'PKR',
-      notes: supplierData.notes || '',
-      status: supplierData.status || 'active',
-      createdBy: req.user.id
-    };
+    // ✅ Map frontend data to backend schema
+    const mappedData = mapFrontendToBackend(req.body);
+    mappedData.createdBy = req.user.id;
 
     console.log('📦 Creating supplier with mapped data:', mappedData);
 
@@ -130,9 +139,46 @@ exports.getSupplier = async (req, res) => {
       });
     }
 
+    // ✅ Return flat structure for frontend
+    const flatData = {
+      _id: supplier._id,
+      companyName: supplier.companyName,
+      contactPerson: supplier.contactPerson,
+      email: supplier.email,
+      phone: supplier.phone,
+      alternativePhone: supplier.alternativePhone || '',
+      website: supplier.website || '',
+      address: supplier.address?.street || '',
+      city: supplier.address?.city || '',
+      state: supplier.address?.state || '',
+      country: supplier.address?.country || 'Pakistan',
+      postalCode: supplier.address?.postalCode || '',
+      businessType: supplier.businessType || 'distributor',
+      gstNumber: supplier.gstNumber || '',
+      ntfnNumber: supplier.ntfnNumber || '',
+      bankName: supplier.bankName || '',
+      accountTitle: supplier.accountTitle || '',
+      accountNumber: supplier.accountNumber || '',
+      branchCode: supplier.branchCode || '',
+      paymentTerms: supplier.paymentTerms || 'net_30',
+      currency: supplier.currency || 'PKR',
+      notes: supplier.notes || '',
+      status: supplier.status || 'active',
+      creditLimit: supplier.creditLimit || 0,
+      taxRate: supplier.taxRate || 0,
+      discountRate: supplier.discountRate || 0,
+      deliveryTime: supplier.deliveryTime || '3-5 days',
+      industry: supplier.industry || 'pharmaceutical',
+      rating: supplier.rating || 0,
+      totalOrders: supplier.totalOrders || 0,
+      totalSpent: supplier.totalSpent || 0,
+      createdAt: supplier.createdAt,
+      updatedAt: supplier.updatedAt
+    };
+
     res.json({ 
       success: true, 
-      data: supplier 
+      data: flatData 
     });
   } catch (error) {
     console.error('❌ Get supplier error:', error);
@@ -148,10 +194,27 @@ exports.getSupplier = async (req, res) => {
 // ============================================
 exports.updateSupplier = async (req, res) => {
   try {
+    const supplierId = req.params.id;
+    
+    // ✅ Map frontend data to backend schema
+    const mappedData = mapFrontendToBackend(req.body);
+    
+    // Remove fields that shouldn't be updated
+    delete mappedData._id;
+    delete mappedData.createdAt;
+    delete mappedData.__v;
+    delete mappedData.createdBy;
+
+    console.log('📦 Updating supplier with mapped data:', mappedData);
+
     const supplier = await Supplier.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
+      supplierId,
+      mappedData,
+      { 
+        new: true, 
+        runValidators: true,
+        context: 'query'
+      }
     );
 
     if (!supplier) {
@@ -163,16 +226,63 @@ exports.updateSupplier = async (req, res) => {
 
     console.log('✅ Supplier updated:', supplier._id);
 
+    // ✅ Return flat structure for frontend
+    const flatData = {
+      _id: supplier._id,
+      companyName: supplier.companyName,
+      contactPerson: supplier.contactPerson,
+      email: supplier.email,
+      phone: supplier.phone,
+      alternativePhone: supplier.alternativePhone || '',
+      website: supplier.website || '',
+      address: supplier.address?.street || '',
+      city: supplier.address?.city || '',
+      state: supplier.address?.state || '',
+      country: supplier.address?.country || 'Pakistan',
+      postalCode: supplier.address?.postalCode || '',
+      businessType: supplier.businessType || 'distributor',
+      gstNumber: supplier.gstNumber || '',
+      ntfnNumber: supplier.ntfnNumber || '',
+      bankName: supplier.bankName || '',
+      accountTitle: supplier.accountTitle || '',
+      accountNumber: supplier.accountNumber || '',
+      branchCode: supplier.branchCode || '',
+      paymentTerms: supplier.paymentTerms || 'net_30',
+      currency: supplier.currency || 'PKR',
+      notes: supplier.notes || '',
+      status: supplier.status || 'active',
+      creditLimit: supplier.creditLimit || 0,
+      taxRate: supplier.taxRate || 0,
+      discountRate: supplier.discountRate || 0,
+      deliveryTime: supplier.deliveryTime || '3-5 days',
+      industry: supplier.industry || 'pharmaceutical',
+      rating: supplier.rating || 0,
+      totalOrders: supplier.totalOrders || 0,
+      totalSpent: supplier.totalSpent || 0,
+      createdAt: supplier.createdAt,
+      updatedAt: supplier.updatedAt
+    };
+
     res.json({ 
       success: true, 
-      data: supplier,
+      data: flatData,
       message: 'Supplier updated successfully!'
     });
   } catch (error) {
     console.error('❌ Update supplier error:', error);
+    
+    // Handle duplicate email error
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Supplier with this email already exists'
+      });
+    }
+
     res.status(500).json({ 
       success: false, 
-      message: error.message 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };

@@ -120,7 +120,7 @@ exports.createInvoice = async (req, res) => {
           });
           
           await salesman.save();
-          console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+          
         }
       } catch (err) {
         console.error('Error updating salesman incentive:', err);
@@ -313,7 +313,7 @@ exports.deleteInvoice = async (req, res) => {
             salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
             
             await salesman.save();
-            console.log(`🔄 Incentive ₹${invoiceData.incentive.toFixed(2)} reversed from ${salesman.name} for invoice ${invoiceData.invoiceNumber}`);
+            
           } else {
             // ✅ If not found in history, still deduct from totals
             salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - invoiceData.incentive);
@@ -322,7 +322,7 @@ exports.deleteInvoice = async (req, res) => {
             salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
             
             await salesman.save();
-            console.log(`🔄 Incentive ₹${invoiceData.incentive.toFixed(2)} reversed from ${salesman.name} (history entry not found)`);
+           
           }
         }
       } catch (err) {
@@ -361,7 +361,7 @@ exports.deleteInvoice = async (req, res) => {
           });
           
           await lead.save();
-          console.log(`🔄 Lead ${lead.name} status reverted to proforma_sent`);
+          
         }
       } catch (err) {
         console.error('Error updating lead on invoice delete:', err);
@@ -550,7 +550,7 @@ exports.createInvoiceFromQuotation = async (req, res) => {
           });
           
           await salesman.save();
-          console.log(`✅ Incentive ₹${totalIncentive.toFixed(2)} credited to ${salesman.name}`);
+         
         }
       } catch (err) {
         console.error('Error updating salesman incentive:', err);
