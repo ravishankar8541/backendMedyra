@@ -10,7 +10,9 @@ const {
   addBatch,
   getLowStockProducts,
   updateStock,
-  removeBatchStock
+  removeBatchStock,
+  updateBatch,
+   deleteBatch 
 } = require('../controllers/productController');
 
 // ============================================
@@ -35,9 +37,14 @@ router.route('/:id')
 // Add batch to product
 router.post('/:id/batch', protect, restrictTo('admin', 'manager'), addBatch);
 
+
+// ✅ UPDATE EXISTING BATCH (Add/Remove stock)
+router.put('/:id/batch/:batchIndex', protect, restrictTo('admin', 'manager'), updateBatch);
+
 // Remove batch stock
 router.delete('/:id/batch', protect, restrictTo('admin', 'manager'), removeBatchStock);
 
+router.delete('/:id/batch/:batchIndex', protect, restrictTo('admin', 'manager'), deleteBatch);
 // Update stock
 router.patch('/:id/stock', protect, restrictTo('admin', 'manager'), updateStock);
 

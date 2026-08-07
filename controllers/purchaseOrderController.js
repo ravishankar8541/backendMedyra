@@ -1,4 +1,4 @@
-// controllers/purchaseOrderController.js - FIXED VERSION
+// controllers/purchaseOrderController.js - FULL FIXED GST & BATCH VERSION
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 
@@ -9,6 +9,8 @@ exports.createPurchaseOrder = async (req, res) => {
   try {
     const { 
       supplier, 
+      supplierId,
+      supplierName,
       supplierAddress, 
       supplierGST, 
       supplierContact, 
@@ -18,9 +20,14 @@ exports.createPurchaseOrder = async (req, res) => {
       notes, 
       expectedDate,
       gstType,
-      igstRate,
-      cgstRate,
-      sgstRate
+      currency,
+      exchangeRate,
+      subtotal,
+      totalTax,
+      igst,
+      cgst,
+      sgst,
+      total
     } = req.body;
 
     // Validate items
@@ -28,28 +35,57 @@ exports.createPurchaseOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'At least one item required' });
     }
 
-    // Calculate totals
-    const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-    
-    let igst = 0, cgst = 0, sgst = 0;
-    if (gstType === 'igst') {
-      igst = (subtotal * (igstRate || 5)) / 100;
-    } else {
-      cgst = (subtotal * (cgstRate || 2.5)) / 100;
-      sgst = (subtotal * (sgstRate || 2.5)) / 100;
-    }
-    
-    const total = subtotal + igst + cgst + sgst;
+    // Process & Map Items with Item-Level GST & Batch Info
+    const formattedItems = items.map(item => {
+      const qty = parseInt(item.quantity) || 0;
+      const rate = parseFloat(item.unitPrice) || 0;
+      const taxRate = parseFloat(item.taxRate) || 0;
+      const itemSubtotal = qty * rate;
+      const itemTax = itemSubtotal * (taxRate / 100);
+      const itemTotalWithTax = itemSubtotal + itemTax;
 
-    // Generate PO number
+      return {
+        product: item.product || item.productId || 'N/A',
+        productId: item.productId || null,
+        productName: item.productName || item.name || '',
+        name: item.productName || item.name || '',
+        batchNumber: item.batchNumber || 'N/A',
+        description: item.description || '',
+        sku: item.sku || '',
+        hsn: item.hsn || '',
+        quantity: qty,
+        unit: item.unit || 'Strips',
+        unitPrice: rate,
+        taxRate: taxRate,
+        total: itemSubtotal,
+        totalWithTax: item.totalWithTax ? parseFloat(item.totalWithTax) : itemTotalWithTax,
+        isBatchProduct: item.isBatchProduct !== undefined ? item.isBatchProduct : true
+      };
+    });
+
+    // Compute or Fallback Order Totals
+    const calcSubtotal = subtotal !== undefined ? parseFloat(subtotal) : formattedItems.reduce((sum, i) => sum + i.total, 0);
+    const calcTotalTax = totalTax !== undefined ? parseFloat(totalTax) : formattedItems.reduce((sum, i) => sum + (i.totalWithTax - i.total), 0);
+    const calcGrandTotal = total !== undefined ? parseFloat(total) : (calcSubtotal + calcTotalTax);
+
+    let calcIgst = 0, calcCgst = 0, calcSgst = 0;
+    if (gstType === 'cgst_sgst') {
+      calcCgst = cgst !== undefined ? parseFloat(cgst) : (calcTotalTax / 2);
+      calcSgst = sgst !== undefined ? parseFloat(sgst) : (calcTotalTax / 2);
+    } else {
+      calcIgst = igst !== undefined ? parseFloat(igst) : calcTotalTax;
+    }
+
+    // Generate PO Number
     const year = new Date().getFullYear();
     const count = await PurchaseOrder.countDocuments();
     const poNumber = `PO-${year}/${String(count + 1).padStart(3, '0')}`;
 
     const purchaseOrder = new PurchaseOrder({
       poNumber,
-      supplier,
-      supplierName: supplier,
+      supplier: supplier || supplierName || 'N/A',
+      supplierId: supplierId || null,
+      supplierName: supplierName || supplier || '',
       supplierAddress: supplierAddress || 'N/A',
       supplierGST: supplierGST || 'N/A',
       supplierContact: supplierContact || 'N/A',
@@ -57,26 +93,16 @@ exports.createPurchaseOrder = async (req, res) => {
       ccEmail: ccEmail || '',
       date: new Date().toISOString().split('T')[0],
       expectedDate: expectedDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      items: items.map(item => ({
-        product: item.product,
-        name: item.product,
-        description: item.description || '',
-        sku: item.sku || '',
-        hsn: item.hsn || '',
-        quantity: parseInt(item.quantity) || 0,
-        unit: item.unit || 'Strips',
-        unitPrice: parseFloat(item.unitPrice) || 0,
-        total: (parseInt(item.quantity) || 0) * (parseFloat(item.unitPrice) || 0)
-      })),
-      subtotal,
+      items: formattedItems,
+      currency: currency || 'INR',
+      exchangeRate: parseFloat(exchangeRate) || 1,
+      subtotal: calcSubtotal,
       gstType: gstType || 'igst',
-      igst,
-      igstRate: igstRate || 5,
-      cgst,
-      cgstRate: cgstRate || 2.5,
-      sgst,
-      sgstRate: sgstRate || 2.5,
-      total,
+      totalTax: calcTotalTax,
+      igst: calcIgst,
+      cgst: calcCgst,
+      sgst: calcSgst,
+      total: calcGrandTotal,
       status: 'pending',
       notes: notes || 'No notes',
       createdFromAlert: req.body.fromAlert || false,
@@ -87,13 +113,15 @@ exports.createPurchaseOrder = async (req, res) => {
 
     await purchaseOrder.save();
 
+    console.log(`✅ Purchase Order ${poNumber} created with full GST breakdown`);
+
     res.status(201).json({
       success: true,
       data: purchaseOrder,
       message: `Purchase Order ${poNumber} created successfully`
     });
   } catch (error) {
-    console.error('Create purchase order error:', error);
+    console.error('❌ Create purchase order error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -110,7 +138,8 @@ exports.getPurchaseOrders = async (req, res) => {
     if (search) {
       query.$or = [
         { poNumber: { $regex: search, $options: 'i' } },
-        { supplier: { $regex: search, $options: 'i' } }
+        { supplier: { $regex: search, $options: 'i' } },
+        { supplierName: { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -122,7 +151,6 @@ exports.getPurchaseOrders = async (req, res) => {
 
     const total = await PurchaseOrder.countDocuments(query);
 
-    // Stats
     const pending = await PurchaseOrder.countDocuments({ status: 'pending' });
     const shipped = await PurchaseOrder.countDocuments({ status: 'shipped' });
     const delivered = await PurchaseOrder.countDocuments({ status: 'delivered' });
@@ -131,7 +159,7 @@ exports.getPurchaseOrders = async (req, res) => {
     res.json({
       success: true,
       data: orders,
-      stats: { total: orders.length, pending, shipped, delivered, cancelled },
+      stats: { total, pending, shipped, delivered, cancelled },
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),

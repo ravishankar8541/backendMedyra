@@ -103,6 +103,150 @@ exports.createProduct = async (req, res) => {
   }
 };
 
+
+// ============================================
+// UPDATE BATCH - FULL EDIT
+// ============================================
+exports.updateBatch = async (req, res) => {
+  try {
+    const { batchIndex } = req.params;
+    const { batchNumber, mfgDate, expDate, quantity, manufacturer, reason, action } = req.body;
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const index = parseInt(batchIndex);
+    if (isNaN(index) || index >= product.batches.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+
+    const batch = product.batches[index];
+    
+    if (action === 'edit') {
+      // FULL EDIT - Update all fields
+      batch.batchNumber = batchNumber || batch.batchNumber;
+      batch.mfgDate = mfgDate || batch.mfgDate;
+      batch.expDate = expDate || batch.expDate;
+      batch.quantity = parseInt(quantity) || batch.quantity;
+      batch.manufacturer = manufacturer || batch.manufacturer || 'N/A';
+      batch.reason = reason || batch.reason || 'Batch updated';
+      batch.addedDate = new Date().toISOString().split('T')[0];
+      
+      console.log(`✅ Batch ${batch.batchNumber} updated successfully`);
+    } else if (action === 'add') {
+      // ADD stock to existing batch
+      const addQuantity = parseInt(quantity) || 0;
+      if (addQuantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid quantity is required'
+        });
+      }
+      
+      batch.quantity += addQuantity;
+      batch.reason = reason || `Stock addition (${addQuantity} units)`;
+      batch.addedDate = new Date().toISOString().split('T')[0];
+      
+      console.log(`✅ Added ${addQuantity} to batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+    } else {
+      // REMOVE stock from batch
+      const removeQuantity = parseInt(quantity) || 0;
+      if (removeQuantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid quantity is required'
+        });
+      }
+      
+      if (batch.quantity < removeQuantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock in batch. Available: ${batch.quantity}`
+        });
+      }
+      
+      batch.quantity -= removeQuantity;
+      batch.reason = reason || `Stock removal (${removeQuantity} units)`;
+      
+      console.log(`✅ Removed ${removeQuantity} from batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+      
+      // If batch quantity becomes 0, remove the batch
+      if (batch.quantity === 0) {
+        product.batches.splice(index, 1);
+        console.log(`🗑️ Batch ${batch.batchNumber} removed`);
+      }
+    }
+
+    await product.save();
+
+    res.json({
+      success: true,
+      data: product,
+      batch: product.batches[index] || null,
+      message: `Batch updated successfully!`
+    });
+  } catch (error) {
+    console.error('Update batch error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// ============================================
+// DELETE BATCH
+// ============================================
+exports.deleteBatch = async (req, res) => {
+  try {
+    const { batchIndex } = req.params;
+    const product = await Product.findById(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const index = parseInt(batchIndex);
+    if (isNaN(index) || index >= product.batches.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+
+    const batch = product.batches[index];
+    const batchNumber = batch.batchNumber || 'N/A';
+    
+    // Remove the batch
+    product.batches.splice(index, 1);
+    await product.save();
+
+    console.log(`🗑️ Batch ${batchNumber} deleted successfully`);
+
+    res.json({
+      success: true,
+      message: `Batch ${batchNumber} deleted successfully!`,
+      data: product
+    });
+  } catch (error) {
+    console.error('Delete batch error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
 // ============================================
 // GET ALL PRODUCTS
 // ============================================

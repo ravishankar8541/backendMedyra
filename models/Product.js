@@ -5,62 +5,50 @@ const BatchSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-
   mfgDate: {
     type: String,
     default: "",
   },
-
   expDate: {
     type: String,
     default: "",
   },
-
   quantity: {
     type: Number,
     default: 0,
   },
-
   packing: {
     type: String,
     default: "N/A",
   },
-
   grossWeight: {
     type: Number,
     default: 0,
   },
-
   totalKg: {
     type: Number,
     default: 0,
   },
-
   dimension: {
     type: String,
     default: "N/A",
   },
-
   storageCondition: {
     type: String,
     default: "Room temperature",
   },
-
   shelfLife: {
     type: String,
     default: "N/A",
   },
-
   addedDate: {
     type: String,
     default: "",
   },
-
   addedBy: {
     type: String,
     default: "System",
   },
-
   reason: {
     type: String,
     default: "Stock addition",
@@ -78,43 +66,35 @@ const ProductSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-
     sku: {
       type: String,
       unique: true,
       sparse: true,
     },
-
     category: {
       type: String,
       required: true,
     },
-
     subCategory: {
       type: String,
       default: "",
     },
-
     brand: {
       type: String,
       default: "",
     },
-
     manufacturer: {
       type: String,
       default: "",
     },
-
     hsnCode: {
       type: String,
       default: "",
     },
-
     unit: {
       type: String,
       default: "Pcs",
     },
-
     productType: {
       type: String,
       enum: ["batch", "non-batch"],
@@ -127,27 +107,22 @@ const ProductSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
-
       sellingPrice: {
         type: Number,
         default: 0,
       },
-
       costPrice: {
         type: Number,
         default: 0,
       },
-
       taxRate: {
         type: Number,
         default: 18,
       },
-
       discount: {
         type: Number,
         default: 0,
       },
-
       currency: {
         type: String,
         default: "INR",
@@ -159,17 +134,14 @@ const ProductSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-
     minStock: {
       type: Number,
       default: 0,
     },
-
     maxStock: {
       type: Number,
       default: 0,
     },
-
     reorderLevel: {
       type: Number,
       default: 0,
@@ -186,7 +158,6 @@ const ProductSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
-
     documents: {
       type: [String],
       default: [],
@@ -209,12 +180,10 @@ const ProductSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Supplier",
     },
-
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
-
     lastUpdated: {
       type: Date,
       default: Date.now,
@@ -243,18 +212,23 @@ ProductSchema.index({
   createdAt: -1,
 });
 
-
+// Pre-save Hook: Stock & Status Calculation
 ProductSchema.pre("save", function () {
-  let totalStock = 0;
-
-  if (Array.isArray(this.batches) && this.batches.length > 0) {
-    this.batches.forEach((batch) => {
-      totalStock += Number(batch.quantity) || 0;
-    });
+  // ✅ Only calculate stock from batches IF productType is 'batch'
+  if (this.productType === "batch") {
+    let totalStock = 0;
+    if (Array.isArray(this.batches) && this.batches.length > 0) {
+      this.batches.forEach((batch) => {
+        totalStock += Number(batch.quantity) || 0;
+      });
+      this.stock = totalStock;
+    }
+  } else {
+    // Non-batch products do not maintain batches
+    this.batches = [];
   }
 
-  this.stock = totalStock;
-
+  // Calculate status based on final stock
   if (this.stock <= 0) {
     this.status = "inactive";
   } else if (
@@ -273,6 +247,5 @@ ProductSchema.pre("save", function () {
 
   this.lastUpdated = new Date();
 });
-
 
 module.exports = mongoose.model("Product", ProductSchema);

@@ -1,13 +1,26 @@
 const mongoose = require('mongoose');
 
+// Item-level Schema (Store individual Item GST & Batch)
 const PurchaseOrderItemSchema = new mongoose.Schema({
   product: {
     type: String,
     required: true
   },
+  productId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product'
+  },
+  productName: {
+    type: String,
+    default: ''
+  },
   name: {
     type: String,
     default: ''
+  },
+  batchNumber: {
+    type: String,
+    default: 'N/A'
   },
   description: {
     type: String,
@@ -35,9 +48,21 @@ const PurchaseOrderItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  taxRate: {
+    type: Number,
+    default: 0
+  },
   total: {
     type: Number,
     required: true
+  },
+  totalWithTax: {
+    type: Number,
+    default: 0
+  },
+  isBatchProduct: {
+    type: Boolean,
+    default: true
   }
 });
 
@@ -52,6 +77,11 @@ const PurchaseOrderSchema = new mongoose.Schema(
     supplier: {
       type: String,
       required: true
+    },
+
+    supplierId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Supplier'
     },
 
     supplierName: {
@@ -114,6 +144,18 @@ const PurchaseOrderSchema = new mongoose.Schema(
       default: []
     },
 
+    // ===== CURRENCY & RATES =====
+    currency: {
+      type: String,
+      default: 'INR'
+    },
+
+    exchangeRate: {
+      type: Number,
+      default: 1
+    },
+
+    // ===== VALUATION & GST BREAKDOWN =====
     subtotal: {
       type: Number,
       required: true,
@@ -126,14 +168,14 @@ const PurchaseOrderSchema = new mongoose.Schema(
       default: 'igst'
     },
 
-    igst: {
+    totalTax: {
       type: Number,
       default: 0
     },
 
-    igstRate: {
+    igst: {
       type: Number,
-      default: 5
+      default: 0
     },
 
     cgst: {
@@ -141,19 +183,9 @@ const PurchaseOrderSchema = new mongoose.Schema(
       default: 0
     },
 
-    cgstRate: {
-      type: Number,
-      default: 2.5
-    },
-
     sgst: {
       type: Number,
       default: 0
-    },
-
-    sgstRate: {
-      type: Number,
-      default: 2.5
     },
 
     total: {
@@ -194,7 +226,7 @@ const PurchaseOrderSchema = new mongoose.Schema(
 );
 
 // Indexes
-PurchaseOrderSchema.index({ supplier: 'text' });
+PurchaseOrderSchema.index({ supplier: 'text', poNumber: 'text' });
 PurchaseOrderSchema.index({ status: 1 });
 PurchaseOrderSchema.index({ createdAt: -1 });
 
