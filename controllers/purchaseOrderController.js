@@ -76,10 +76,30 @@ exports.createPurchaseOrder = async (req, res) => {
       calcIgst = igst !== undefined ? parseFloat(igst) : calcTotalTax;
     }
 
-    // Generate PO Number
+    // ✅ FIX: Safe PO Number Generation (Handles Deletions & Concurrency)
     const year = new Date().getFullYear();
-    const count = await PurchaseOrder.countDocuments();
-    const poNumber = `PO-${year}/${String(count + 1).padStart(3, '0')}`;
+    const lastOrder = await PurchaseOrder.findOne({
+      poNumber: new RegExp(`^PO-${year}/`)
+    }).sort({ createdAt: -1 });
+
+    let nextNumber = 1;
+    if (lastOrder && lastOrder.poNumber) {
+      const parts = lastOrder.poNumber.split('/');
+      if (parts.length === 2) {
+        const lastSeq = parseInt(parts[1], 10);
+        if (!isNaN(lastSeq)) {
+          nextNumber = lastSeq + 1;
+        }
+      }
+    }
+
+    let poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
+
+    // Extra safety guard: ensure no collision if poNumber exists
+    while (await PurchaseOrder.exists({ poNumber })) {
+      nextNumber++;
+      poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
+    }
 
     const purchaseOrder = new PurchaseOrder({
       poNumber,

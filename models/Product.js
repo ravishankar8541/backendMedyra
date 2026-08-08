@@ -1,3 +1,4 @@
+// models/Product.js
 const mongoose = require("mongoose");
 
 const BatchSchema = new mongoose.Schema({
@@ -55,12 +56,8 @@ const BatchSchema = new mongoose.Schema({
   },
 });
 
-// ===============================
-// Product Schema
-// ===============================
 const ProductSchema = new mongoose.Schema(
   {
-    // Basic Info
     name: {
       type: String,
       required: true,
@@ -100,82 +97,33 @@ const ProductSchema = new mongoose.Schema(
       enum: ["batch", "non-batch"],
       default: "batch",
     },
-
-    // Pricing
     pricing: {
-      mrp: {
-        type: Number,
-        default: 0,
-      },
-      sellingPrice: {
-        type: Number,
-        default: 0,
-      },
-      costPrice: {
-        type: Number,
-        default: 0,
-      },
-      taxRate: {
-        type: Number,
-        default: 18,
-      },
-      discount: {
-        type: Number,
-        default: 0,
-      },
-      currency: {
-        type: String,
-        default: "INR",
-      },
+      mrp: { type: Number, default: 0 },
+      sellingPrice: { type: Number, default: 0 },
+      costPrice: { type: Number, default: 0 },
+      taxRate: { type: Number, default: 18 },
+      discount: { type: Number, default: 0 },
+      currency: { type: String, default: "INR" },
     },
-
-    // Stock
     stock: {
       type: Number,
       default: 0,
     },
-    minStock: {
-      type: Number,
-      default: 0,
-    },
-    maxStock: {
-      type: Number,
-      default: 0,
-    },
-    reorderLevel: {
-      type: Number,
-      default: 0,
-    },
+    minStock: { type: Number, default: 0 },
+    maxStock: { type: Number, default: 0 },
+    reorderLevel: { type: Number, default: 0 },
 
-    // Batch
     batches: {
       type: [BatchSchema],
       default: [],
     },
-
-    // Media
-    images: {
-      type: [String],
-      default: [],
-    },
-    documents: {
-      type: [String],
-      default: [],
-    },
-
-    // Status
+    images: { type: [String], default: [] },
+    documents: { type: [String], default: [] },
     status: {
       type: String,
-      enum: [
-        "active",
-        "low_stock",
-        "critical",
-        "inactive",
-        "pending",
-      ],
+      enum: ["active", "low_stock", "critical", "inactive", "pending"],
       default: "pending",
     },
-
     supplier: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Supplier",
@@ -194,52 +142,30 @@ const ProductSchema = new mongoose.Schema(
   }
 );
 
-// ===============================
-// Indexes
-// ===============================
-ProductSchema.index({
-  name: "text",
-  sku: "text",
-  brand: "text",
-});
+ProductSchema.index({ name: "text", sku: "text", brand: "text" });
+ProductSchema.index({ category: 1, status: 1 });
+ProductSchema.index({ createdAt: -1 });
 
-ProductSchema.index({
-  category: 1,
-  status: 1,
-});
-
-ProductSchema.index({
-  createdAt: -1,
-});
-
-// Pre-save Hook: Stock & Status Calculation
+// ✅ FIX: Pre-save Hook: Accurately calculate batch stock even when empty
 ProductSchema.pre("save", function () {
-  // ✅ Only calculate stock from batches IF productType is 'batch'
   if (this.productType === "batch") {
     let totalStock = 0;
     if (Array.isArray(this.batches) && this.batches.length > 0) {
       this.batches.forEach((batch) => {
         totalStock += Number(batch.quantity) || 0;
       });
-      this.stock = totalStock;
     }
+    this.stock = totalStock; // Always update total stock
   } else {
-    // Non-batch products do not maintain batches
     this.batches = [];
   }
 
-  // Calculate status based on final stock
+  // Calculate status
   if (this.stock <= 0) {
     this.status = "inactive";
-  } else if (
-    this.reorderLevel > 0 &&
-    this.stock <= this.reorderLevel
-  ) {
+  } else if (this.reorderLevel > 0 && this.stock <= this.reorderLevel) {
     this.status = "critical";
-  } else if (
-    this.minStock > 0 &&
-    this.stock <= this.minStock
-  ) {
+  } else if (this.minStock > 0 && this.stock <= this.minStock) {
     this.status = "low_stock";
   } else {
     this.status = "active";
@@ -248,4 +174,4 @@ ProductSchema.pre("save", function () {
   this.lastUpdated = new Date();
 });
 
-module.exports = mongoose.model("Product", ProductSchema);
+module.exports = mongoose.models.Product || mongoose.model("Product", ProductSchema);
