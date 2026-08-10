@@ -1,12 +1,8 @@
-// controllers/invoiceController.js - UPDATED WITH INCENTIVE REVERSAL
-
+// controllers/invoiceController.js - FULL UPDATED VERSION WITH INSTALLMENTS
 const Invoice = require('../models/Invoice');
 const Lead = require('../models/Lead');
 const User = require('../models/User');
 
-// ============================================
-// ✅ INCENTIVE CALCULATION
-// ============================================
 const calculateIncentive = (revenue, profitPercentage) => {
   if (profitPercentage >= 35) {
     return revenue * 0.02;
@@ -20,6 +16,103 @@ const calculateIncentive = (revenue, profitPercentage) => {
     return revenue * 0.004;
   } else {
     return 0;
+  }
+};
+
+// ============================================
+// ✅ ADD PAYMENT / INSTALLMENT TO INVOICE
+// ============================================
+exports.addInvoicePayment = async (req, res) => {
+  try {
+    const { amount, method, reference, notes, date } = req.body;
+    const invoice = await Invoice.findById(req.params.id);
+
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const payAmount = parseFloat(amount) || 0;
+    if (payAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid payment amount' });
+    }
+
+    const currentDue = invoice.dueAmount !== undefined ? invoice.dueAmount : (invoice.total - (invoice.paidAmount || 0));
+    
+    if (payAmount > currentDue + 0.5) {
+      return res.status(400).json({
+        success: false,
+        message: `Payment amount (₹${payAmount}) exceeds remaining balance (₹${currentDue.toFixed(2)})`
+      });
+    }
+
+    const newPayment = {
+      amount: payAmount,
+      date: date ? new Date(date) : new Date(),
+      method: method || 'bank_transfer',
+      reference: reference || '',
+      notes: notes || '',
+      receivedBy: req.user.id
+    };
+
+    if (!invoice.payments) invoice.payments = [];
+    invoice.payments.push(newPayment);
+
+    // Recalculate totals
+    let totalPaid = 0;
+    invoice.payments.forEach(p => {
+      totalPaid += p.amount || 0;
+    });
+
+    invoice.paidAmount = Math.round(totalPaid * 100) / 100;
+    invoice.dueAmount = Math.max(0, Math.round((invoice.total - totalPaid) * 100) / 100);
+
+    if (invoice.dueAmount <= 0.01) {
+      invoice.paymentStatus = 'paid';
+      invoice.status = 'paid';
+      invoice.paymentDate = new Date();
+    } else {
+      invoice.paymentStatus = 'partially_paid';
+    }
+
+    await invoice.save();
+
+    // ✅ Update lead payment status if linked
+    if (invoice.leadId) {
+      try {
+        const lead = await Lead.findById(invoice.leadId);
+        if (lead) {
+          if (invoice.paymentStatus === 'paid') {
+            lead.payment = {
+              status: 'paid',
+              amount: invoice.total,
+              method: method || 'bank_transfer',
+              date: new Date(),
+              reference: reference || ''
+            };
+          } else {
+            lead.payment = {
+              status: 'partial',
+              amount: totalPaid,
+              method: method || 'bank_transfer',
+              date: new Date(),
+              reference: reference || ''
+            };
+          }
+          await lead.save();
+        }
+      } catch (err) {
+        console.error('Error updating lead payment:', err);
+      }
+    }
+
+    res.json({
+      success: true,
+      data: invoice,
+      message: `✅ Payment of ₹${payAmount} recorded successfully! Remaining: ₹${invoice.dueAmount.toFixed(2)}`
+    });
+  } catch (error) {
+    console.error('Add payment error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -75,9 +168,10 @@ exports.createInvoice = async (req, res) => {
       });
     }
 
+    const totalInvoiceAmount = subtotal + tax;
     invoiceData.subtotal = subtotal;
     invoiceData.tax = tax;
-    invoiceData.total = subtotal + tax;
+    invoiceData.total = totalInvoiceAmount;
     
     invoiceData.incentive = totalIncentive;
     invoiceData.profit = totalProfit;
@@ -85,6 +179,27 @@ exports.createInvoice = async (req, res) => {
     invoiceData.totalCost = totalCost;
     invoiceData.profitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
     
+    // Handle initial payment
+    const initPay = parseFloat(invoiceData.initialPayment) || 0;
+    if (initPay > 0) {
+      invoiceData.payments = [{
+        amount: initPay,
+        date: new Date(),
+        method: invoiceData.paymentMethod || 'advance',
+        reference: invoiceData.paymentReference || '',
+        notes: invoiceData.paymentNotes || 'Advance payment',
+        receivedBy: req.user.id
+      }];
+      invoiceData.paidAmount = initPay;
+      invoiceData.dueAmount = Math.max(0, Math.round((totalInvoiceAmount - initPay) * 100) / 100);
+      invoiceData.paymentStatus = initPay >= totalInvoiceAmount ? 'paid' : 'partially_paid';
+      if (initPay >= totalInvoiceAmount) invoiceData.status = 'paid';
+    } else {
+      invoiceData.paidAmount = 0;
+      invoiceData.dueAmount = totalInvoiceAmount;
+      invoiceData.paymentStatus = 'unpaid';
+    }
+
     if (invoiceData.leadId) {
       const lead = await Lead.findById(invoiceData.leadId).populate('assignedTo', 'name');
       if (lead) {
@@ -96,7 +211,7 @@ exports.createInvoice = async (req, res) => {
     const invoice = new Invoice(invoiceData);
     await invoice.save();
 
-    // ✅ Credit incentive to salesman
+    // Credit incentive to salesman
     if (invoiceData.assignedTo && totalIncentive > 0) {
       try {
         const salesman = await User.findById(invoiceData.assignedTo);
@@ -120,7 +235,6 @@ exports.createInvoice = async (req, res) => {
           });
           
           await salesman.save();
-          
         }
       } catch (err) {
         console.error('Error updating salesman incentive:', err);
@@ -155,12 +269,13 @@ exports.getInvoices = async (req, res) => {
     const { page = 1, limit = 10, status, type, search } = req.query;
 
     const query = {};
-    if (status) query.status = status;
-    if (type) query.type = type;
+    if (status && status !== 'all') query.status = status;
+    if (type && type !== 'all') query.type = type;
     if (search) {
       query.$or = [
         { invoiceNumber: { $regex: search, $options: 'i' } },
-        { 'customer.name': { $regex: search, $options: 'i' } }
+        { 'customer.name': { $regex: search, $options: 'i' } },
+        { 'customer.phone': { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -214,12 +329,6 @@ exports.getInvoice = async (req, res) => {
     });
   } catch (error) {
     console.error('Get invoice error:', error);
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({
-        success: false,
-        message: 'Invoice not found'
-      });
-    }
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
@@ -245,6 +354,9 @@ exports.updateInvoiceStatus = async (req, res) => {
     invoice.status = status;
     if (status === 'paid' && paymentDate) {
       invoice.paymentDate = paymentDate;
+      invoice.dueAmount = 0;
+      invoice.paidAmount = invoice.total;
+      invoice.paymentStatus = 'paid';
     }
 
     await invoice.save();
@@ -276,307 +388,64 @@ exports.deleteInvoice = async (req, res) => {
       });
     }
 
-    // ✅ Store invoice data before deletion for reversal
     const invoiceData = {
       invoiceNumber: invoice.invoiceNumber,
       incentive: invoice.incentive || 0,
       profit: invoice.profit || 0,
       totalValue: invoice.totalValue || 0,
-      totalCost: invoice.totalCost || 0,
       assignedTo: invoice.assignedTo,
-      assignedToName: invoice.assignedToName,
-      leadId: invoice.leadId,
-      customerName: invoice.customer?.name || 'Unknown'
+      leadId: invoice.leadId
     };
 
-    // ============================================
-    // ✅ REVERSE INCENTIVE FROM SALESMAN
-    // ============================================
     if (invoiceData.assignedTo && invoiceData.incentive > 0) {
       try {
         const salesman = await User.findById(invoiceData.assignedTo);
         if (salesman) {
-          // ✅ Find the incentive history entry for this invoice
-          const historyIndex = salesman.incentiveHistory.findIndex(
+          const historyIndex = (salesman.incentiveHistory || []).findIndex(
             h => h.invoiceNumber === invoiceData.invoiceNumber
           );
 
           if (historyIndex !== -1) {
-            // ✅ Remove from incentive history
-            const removedEntry = salesman.incentiveHistory[historyIndex];
             salesman.incentiveHistory.splice(historyIndex, 1);
-            
-            // ✅ Deduct from totals
-            salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - invoiceData.incentive);
-            salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - invoiceData.totalValue);
-            salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
-            salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
-            
-            await salesman.save();
-            
-          } else {
-            // ✅ If not found in history, still deduct from totals
-            salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - invoiceData.incentive);
-            salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - invoiceData.totalValue);
-            salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
-            salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
-            
-            await salesman.save();
-           
           }
+          salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - invoiceData.incentive);
+          salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - invoiceData.totalValue);
+          salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
+          salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
+          await salesman.save();
         }
       } catch (err) {
         console.error('Error reversing salesman incentive:', err);
-        // Don't fail the main operation if incentive reversal fails
       }
     }
 
-    // ============================================
-    // ✅ UPDATE LEAD (if linked)
-    // ============================================
     if (invoiceData.leadId) {
       try {
         const lead = await Lead.findById(invoiceData.leadId);
         if (lead && lead.status === 'converted') {
-          // ✅ Reverse the lead status back to proforma_sent
           lead.status = 'proforma_sent';
-          
-          // ✅ Deduct incentives from lead
           lead.totalIncentive = Math.max(0, (lead.totalIncentive || 0) - invoiceData.incentive);
           lead.totalProfit = Math.max(0, (lead.totalProfit || 0) - invoiceData.profit);
           lead.totalValue = Math.max(0, (lead.totalValue || 0) - invoiceData.totalValue);
-          lead.incentive = Math.max(0, (lead.incentive || 0) - invoiceData.incentive);
-          lead.profit = Math.max(0, (lead.profit || 0) - invoiceData.profit);
-          lead.value = Math.max(0, (lead.value || 0) - invoiceData.totalValue);
-          
-          // ✅ Remove conversion date
           lead.conversionDate = null;
-          
-          // ✅ Add to status history
-          lead.statusHistory.push({
-            status: 'proforma_sent',
-            date: new Date(),
-            notes: `🔄 Invoice ${invoiceData.invoiceNumber} deleted. Incentive reversed.`,
-            updatedBy: req.user.id
-          });
-          
           await lead.save();
-          
         }
       } catch (err) {
         console.error('Error updating lead on invoice delete:', err);
       }
     }
 
-    // ✅ Delete the invoice
     await invoice.deleteOne();
 
     res.json({
       success: true,
-      message: `✅ Invoice ${invoiceData.invoiceNumber} deleted successfully`,
-      incentiveReversed: invoiceData.incentive > 0 ? {
-        amount: invoiceData.incentive,
-        from: invoiceData.assignedToName || 'Unknown',
-        reversed: true
-      } : null
+      message: `✅ Invoice ${invoiceData.invoiceNumber} deleted successfully`
     });
   } catch (error) {
     console.error('Delete invoice error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
-    });
-  }
-};
-
-// ============================================
-// ✅ CREATE INVOICE FROM QUOTATION
-// ============================================
-exports.createInvoiceFromQuotation = async (req, res) => {
-  try {
-    const { quotationId } = req.body;
-    
-    const Quotation = require('../models/Quotation');
-    const quotation = await Quotation.findById(quotationId)
-      .populate('leadId', 'name phone email address assignedTo assignedToName');
-    
-    if (!quotation) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Quotation not found' 
-      });
-    }
-    
-    const existingInvoice = await Invoice.findOne({ quotationId });
-    if (existingInvoice) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invoice already exists for this quotation' 
-      });
-    }
-    
-    const year = new Date().getFullYear();
-    const count = await Invoice.countDocuments();
-    const invoiceNumber = `MPDMS${year}/${String(count + 1).padStart(3, '0')}`;
-    
-    let totalIncentive = 0;
-    let totalProfit = 0;
-    let totalValue = 0;
-    let totalCost = 0;
-    
-    const itemsWithIncentive = quotation.items.map(item => {
-      const quantity = item.quantity || 1;
-      const sellingPrice = item.rate || 0;
-      const costPrice = item.costPrice || 0;
-      const totalValueItem = sellingPrice * quantity;
-      const totalCostItem = costPrice * quantity;
-      const profitAmountItem = totalValueItem - totalCostItem;
-      const profitPercentageItem = totalCostItem > 0 ? (profitAmountItem / totalCostItem) * 100 : 0;
-      const incentive = calculateIncentive(totalValueItem, profitPercentageItem);
-      
-      totalIncentive += incentive;
-      totalProfit += profitAmountItem;
-      totalValue += totalValueItem;
-      totalCost += totalCostItem;
-      
-      return {
-        description: item.productName || item.description || 'Product',
-        quantity: item.quantity,
-        rate: item.rate,
-        taxRate: item.taxRate || 18,
-        amount: item.total || (item.quantity * item.rate),
-        batch: item.batch || '',
-        hsCode: item.hsCode || '',
-        mfgDate: item.mfgDate || '',
-        expiryDate: item.expiryDate || '',
-        unit: item.unit || 'Vial',
-        costPrice: costPrice,
-        sellingPrice: sellingPrice,
-        profitAmount: profitAmountItem,
-        profitPercentage: profitPercentageItem,
-        incentive: incentive
-      };
-    });
-    
-    const invoiceData = {
-      invoiceNumber,
-      type: quotation.type || 'domestic',
-      
-      customer: {
-        name: quotation.customer?.name || quotation.leadId?.name || 'N/A',
-        phone: quotation.customer?.phone || quotation.leadId?.phone || 'N/A',
-        email: quotation.customer?.email || quotation.leadId?.email || '',
-        address: quotation.customer?.address || quotation.leadId?.address || 'N/A',
-        gst: quotation.customer?.gst || '',
-        drugLicense: quotation.customer?.drugLicense || '',
-        state: quotation.customer?.state || '',
-        stateCode: quotation.customer?.stateCode || '',
-        country: quotation.customer?.country || 'India'
-      },
-      
-      items: itemsWithIncentive,
-      
-      subtotal: quotation.subtotal || 0,
-      tax: quotation.tax || 0,
-      total: quotation.total || 0,
-      rounding: quotation.rounding || 0,
-      totalInWords: quotation.totalInWords || '',
-      
-      date: new Date().toISOString().split('T')[0],
-      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      
-      paymentTerms: quotation.paymentTerms || '100% Advance',
-      placeOfSupply: quotation.placeOfSupply || 'Gujarat (24)',
-      notes: quotation.notes || 'Thanks for your business.',
-      terms: quotation.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
-      
-      portOfLoading: quotation.portOfLoading || '',
-      portOfDischarge: quotation.portOfDischarge || '',
-      destinationCountry: quotation.destinationCountry || '',
-      grossWeight: quotation.grossWeight || '',
-      netWeight: quotation.netWeight || '',
-      volumetricWeight: quotation.volumetricWeight || '',
-      countryOfOriginGoods: quotation.countryOfOriginGoods || 'India',
-      totalBoxes: quotation.totalBoxes || '',
-      
-      quotationId: quotation._id,
-      leadId: quotation.leadId?._id || quotation.leadId,
-      
-      status: 'draft',
-      createdBy: req.user.id,
-      
-      incentive: totalIncentive,
-      profit: totalProfit,
-      totalValue: totalValue,
-      totalCost: totalCost,
-      profitPercentage: totalCost > 0 ? (totalProfit / totalCost) * 100 : 0,
-      assignedTo: quotation.leadId?.assignedTo || null,
-      assignedToName: quotation.leadId?.assignedToName || 'Unassigned'
-    };
-    
-    const invoice = new Invoice(invoiceData);
-    await invoice.save();
-    
-    if (quotation.leadId) {
-      await Lead.findByIdAndUpdate(quotation.leadId, {
-        status: 'converted',
-        conversionDate: new Date()
-      });
-    }
-    
-    quotation.status = 'invoiced';
-    await quotation.save();
-    
-    if (quotation.leadId?.assignedTo && totalIncentive > 0) {
-      try {
-        const salesman = await User.findById(quotation.leadId.assignedTo);
-        if (salesman) {
-          salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
-          salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
-          salesman.totalConversions = (salesman.totalConversions || 0) + 1;
-          salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
-          
-          if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
-          salesman.incentiveHistory.push({
-            leadId: quotation.leadId._id,
-            leadName: quotation.leadId.name || 'Unknown',
-            invoiceNumber: invoiceNumber,
-            amount: totalIncentive,
-            value: totalValue,
-            profit: totalProfit,
-            profitPercentage: totalCost > 0 ? (totalProfit / totalCost) * 100 : 0,
-            date: new Date(),
-            status: 'credited'
-          });
-          
-          await salesman.save();
-         
-        }
-      } catch (err) {
-        console.error('Error updating salesman incentive:', err);
-      }
-    }
-    
-    await invoice.populate('createdBy', 'name');
-    
-    res.status(201).json({
-      success: true,
-      data: invoice,
-      incentive: {
-        total: totalIncentive,
-        profit: totalProfit,
-        value: totalValue,
-        profitPercentage: totalCost > 0 ? (totalProfit / totalCost) * 100 : 0,
-        salesman: invoiceData.assignedToName || 'Unassigned'
-      },
-      message: `✅ Invoice ${invoiceNumber} created successfully from quotation!`
-    });
-    
-  } catch (error) {
-    console.error('❌ Create invoice from quotation error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message || 'Failed to create invoice' 
     });
   }
 };

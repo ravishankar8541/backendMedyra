@@ -1,4 +1,5 @@
-// routes/invoiceRoutes.js - Updated routes
+// routes/invoiceRoutes.js - UPDATED WITH PAYMENT ROUTE
+
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
@@ -8,11 +9,10 @@ const {
   getInvoice,
   updateInvoiceStatus,
   deleteInvoice,
-  createInvoiceFromQuotation
+  addInvoicePayment
 } = require('../controllers/invoiceController');
 const { protect, restrictTo } = require('../middleware/auth');
 
-// Validation rules for invoice creation
 const invoiceValidation = [
   body('customer.name').notEmpty().withMessage('Customer name required'),
   body('customer.address').notEmpty().withMessage('Customer address required'),
@@ -21,8 +21,8 @@ const invoiceValidation = [
   body('dueDate').notEmpty().withMessage('Due date required')
 ];
 
-// ✅ Create invoice from quotation (Auto-fill)
-router.post('/from-quotation', protect, restrictTo('accountant', 'admin'), createInvoiceFromQuotation);
+// ✅ Add Installment / Payment to Invoice
+router.post('/:id/payments', protect, addInvoicePayment);
 
 // Routes
 router.route('/')
@@ -31,7 +31,7 @@ router.route('/')
 
 router.route('/:id')
   .get(protect, getInvoice)
-  .delete(protect, restrictTo('admin'), deleteInvoice);  // ✅ Only admin can delete
+  .delete(protect, restrictTo('admin'), deleteInvoice);
 
 router.put('/:id/status', protect, updateInvoiceStatus);
 

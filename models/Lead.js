@@ -1,8 +1,7 @@
 // models/Lead.js - COMPLETE FIXED VERSION
-
 const mongoose = require('mongoose');
 
-// ✅ LeadItemSchema with ALL required fields including incentive
+// ✅ LeadItemSchema - ITEMS ONLY
 const LeadItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -52,7 +51,6 @@ const LeadItemSchema = new mongoose.Schema({
     type: Number,
     default: 18
   },
-  // ✅ Incentive fields per item
   profitAmount: {
     type: Number,
     default: 0
@@ -87,7 +85,7 @@ const LeadItemSchema = new mongoose.Schema({
   }
 });
 
-// ✅ ProformaSchema - With incentive fields and conversion tracking
+// ✅ ProformaSchema
 const ProformaSchema = new mongoose.Schema({
   number: String,
   sentDate: Date,
@@ -118,7 +116,6 @@ const ProformaSchema = new mongoose.Schema({
   terms: String,
   document: String,
   totalInWords: String,
-  
   portOfLoading: String,
   portOfDischarge: String,
   destinationCountry: String,
@@ -129,8 +126,6 @@ const ProformaSchema = new mongoose.Schema({
   totalBoxes: String,
   shippingMark: String,
   vesselNo: String,
-  
-  // ✅ NEW: Conversion tracking fields - PER PROFORMA
   convertedToInvoice: {
     type: Boolean,
     default: false
@@ -152,22 +147,39 @@ const ProformaSchema = new mongoose.Schema({
   }
 });
 
-// ✅ Main Lead Schema
+// ✅ MAIN LEAD SCHEMA
 const LeadSchema = new mongoose.Schema({
+  // ===== BASIC INFO =====
   name: {
     type: String,
     required: true,
     trim: true
+  },
+  companyName: {
+    type: String,
+    default: ''
+  },
+  contactPerson: {
+    type: String,
+    default: ''
   },
   phone: {
     type: String,
     required: true,
     trim: true
   },
+  alternativePhone: {
+    type: String,
+    default: ''
+  },
   email: {
     type: String,
     trim: true,
     lowercase: true
+  },
+  website: {
+    type: String,
+    default: ''
   },
   source: {
     type: String,
@@ -179,15 +191,12 @@ const LeadSchema = new mongoose.Schema({
     maxlength: 1000
   },
 
+  // ===== ADDRESS =====
   address: {
     type: String,
     default: ''
   },
-  gst: {
-    type: String,
-    default: ''
-  },
-  drugLicense: {
+  city: {
     type: String,
     default: ''
   },
@@ -203,31 +212,79 @@ const LeadSchema = new mongoose.Schema({
     type: String,
     default: 'India'
   },
+  countryCode: {
+    type: String,
+    default: 'IN'
+  },
+  postalCode: {
+    type: String,
+    default: ''
+  },
 
+  // ===== TAX & REGISTRATION =====
+  gst: {
+    type: String,
+    default: ''
+  },
+  drugLicense: {
+    type: String,
+    default: ''
+  },
+  ntfnNumber: {
+    type: String,
+    default: ''
+  },
+  businessType: {
+    type: String,
+    default: 'distributor'
+  },
+
+  // ===== BANK DETAILS =====
+  bankName: {
+    type: String,
+    default: ''
+  },
+  accountTitle: {
+    type: String,
+    default: ''
+  },
+  accountNumber: {
+    type: String,
+    default: ''
+  },
+  branchCode: {
+    type: String,
+    default: ''
+  },
+
+  // ===== PAYMENT & CURRENCY =====
+  paymentTerms: {
+    type: String,
+    default: 'net_30'
+  },
+  currency: {
+    type: String,
+    default: 'INR'
+  },
+
+  // ===== STATUS =====
   status: {
     type: String,
     enum: [
-      'new',
-      'contacted',
-      'qualified',
-      'proforma_sent',
-      'order_confirmed',
-      'payment_pending',
-      'converted',
-      'lost'
+      'new', 'contacted', 'qualified', 'proforma_sent',
+      'order_confirmed', 'payment_pending', 'converted', 'lost'
     ],
     default: 'new'
   },
 
-  // ✅ Array to support multiple proformas
+  // ===== PROFORMAS =====
   proformas: {
     type: [ProformaSchema],
     default: []
   },
-
-  // ✅ Keep single proforma for current/latest (backward compatibility)
   proforma: ProformaSchema,
 
+  // ===== QUOTATION =====
   quotation: {
     sentDate: Date,
     amount: Number,
@@ -238,6 +295,7 @@ const LeadSchema = new mongoose.Schema({
 
   orderConfirmedAt: Date,
 
+  // ===== PAYMENT =====
   payment: {
     status: {
       type: String,
@@ -255,12 +313,13 @@ const LeadSchema = new mongoose.Schema({
     notes: String
   },
 
+  // ===== ITEMS =====
   items: {
     type: [LeadItemSchema],
     default: []
   },
 
-  // ✅ Incentive tracking fields at lead level
+  // ===== INCENTIVE TRACKING =====
   totalValue: {
     type: Number,
     default: 0
@@ -273,7 +332,6 @@ const LeadSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-
   value: { type: Number, default: 0 },
   profit: { type: Number, default: 0 },
   incentive: { type: Number, default: 0 },
@@ -281,6 +339,7 @@ const LeadSchema = new mongoose.Schema({
   productSku: { type: String, default: '' },
   quantity: { type: Number, default: 1 },
 
+  // ===== ASSIGNMENT =====
   assignedTo: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -293,6 +352,7 @@ const LeadSchema = new mongoose.Schema({
     ref: 'User'
   },
 
+  // ===== DATES =====
   date: {
     type: Date,
     default: Date.now
@@ -302,6 +362,7 @@ const LeadSchema = new mongoose.Schema({
   conversionDate: Date,
   lastContact: Date,
 
+  // ===== STATUS HISTORY =====
   statusHistory: [{
     status: String,
     date: { type: Date, default: Date.now },
@@ -315,13 +376,13 @@ const LeadSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
+// ===== INDEXES =====
 LeadSchema.index({ name: 'text', phone: 'text', email: 'text' });
 LeadSchema.index({ status: 1, assignedTo: 1 });
 LeadSchema.index({ createdAt: -1 });
 
+// ===== PRE-SAVE HOOK =====
 LeadSchema.pre('save', function () {
-  // ✅ Always respect the skip flag first
   if (this._skipAutoCalculate === true) {
     if (this.isModified('status')) {
       this.statusHistory = this.statusHistory || [];
@@ -332,10 +393,9 @@ LeadSchema.pre('save', function () {
         updatedBy: this._updateBy || this.createdBy
       });
     }
-    return; // ← exit immediately, do NOT touch incentives
+    return;
   }
 
-  // Only auto-calculate from items if we are NOT in conversion/proforma flow
   if (this.items && this.items.length > 0) {
     let totalValue = 0;
     let totalProfit = 0;

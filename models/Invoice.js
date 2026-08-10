@@ -1,5 +1,4 @@
-// models/Invoice.js - FIXED VERSION (Mongoose 8.x compatible)
-
+// models/Invoice.js - FULL UPDATED VERSION WITH INSTALLMENT & PAYMENT TRACKING
 const mongoose = require('mongoose');
 
 const InvoiceItemSchema = new mongoose.Schema({
@@ -36,7 +35,7 @@ const InvoiceItemSchema = new mongoose.Schema({
   },
   countryOfOrigin: String,
   
-  // ✅ Incentive fields per item
+  // Incentive fields per item
   costPrice: {
     type: Number,
     default: 0
@@ -56,6 +55,35 @@ const InvoiceItemSchema = new mongoose.Schema({
   incentive: {
     type: Number,
     default: 0
+  }
+});
+
+// ✅ Payment / Installment Log Schema
+const PaymentLogSchema = new mongoose.Schema({
+  amount: {
+    type: Number,
+    required: true
+  },
+  date: {
+    type: Date,
+    default: Date.now
+  },
+  method: {
+    type: String,
+    enum: ['advance', 'cash', 'neft', 'upi', 'cheque', 'bank_transfer', 'card', 'other'],
+    default: 'bank_transfer'
+  },
+  reference: {
+    type: String,
+    default: ''
+  },
+  notes: {
+    type: String,
+    default: ''
+  },
+  receivedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
 });
 
@@ -95,7 +123,7 @@ const InvoiceSchema = new mongoose.Schema({
   },
   currency: {
     type: String,
-    default: 'USD'
+    default: 'INR'
   },
   exchangeRate: {
     type: Number,
@@ -135,11 +163,28 @@ const InvoiceSchema = new mongoose.Schema({
   totalInWords: String,
   notes: String,
   terms: String,
+
+  // ===== PAYMENT & INSTALLMENT TRACKING =====
   status: {
     type: String,
     enum: ['draft', 'sent', 'paid', 'overdue', 'cancelled'],
     default: 'draft'
   },
+  paidAmount: {
+    type: Number,
+    default: 0
+  },
+  dueAmount: {
+    type: Number,
+    default: 0
+  },
+  paymentStatus: {
+    type: String,
+    enum: ['unpaid', 'partially_paid', 'paid'],
+    default: 'unpaid'
+  },
+  payments: [PaymentLogSchema],
+
   paymentDate: Date,
   paymentMethod: String,
   paymentReference: String,
@@ -179,9 +224,7 @@ const InvoiceSchema = new mongoose.Schema({
     default: Date.now
   },
 
-  // ============================================
-  // ✅ INCENTIVE FIELDS
-  // ============================================
+  // Incentive tracking fields
   incentive: {
     type: Number,
     default: 0
@@ -214,14 +257,18 @@ const InvoiceSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// ✅ FIXED: Remove 'next' parameter - Mongoose 8.x compatible
+// Pre-save hook
 InvoiceSchema.pre('save', function() {
   if (this.isNew && !this.invoiceNumber) {
     const year = new Date().getFullYear();
     const count = Math.floor(Math.random() * 1000);
     this.invoiceNumber = `MPDMS${year}/${String(count).padStart(3, '0')}`;
   }
-  // ✅ No 'next()' needed - mongoose handles it automatically
+
+  // Auto calculate dueAmount if not set
+  if (this.dueAmount === undefined || this.dueAmount === null) {
+    this.dueAmount = Math.max(0, Math.round((this.total - (this.paidAmount || 0)) * 100) / 100);
+  }
 });
 
 module.exports = mongoose.model('Invoice', InvoiceSchema);
