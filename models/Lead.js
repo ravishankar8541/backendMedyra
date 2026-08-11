@@ -1,4 +1,4 @@
-// models/Lead.js - COMPLETE FIXED VERSION
+// models/Lead.js - COMPLETE UPDATED VERSION WITH FREIGHT & METADATA
 const mongoose = require('mongoose');
 
 // ✅ LeadItemSchema - ITEMS ONLY
@@ -85,7 +85,7 @@ const LeadItemSchema = new mongoose.Schema({
   }
 });
 
-// ✅ ProformaSchema
+// ✅ ProformaSchema - INCLUDES ALL FREIGHT & METADATA FIELDS
 const ProformaSchema = new mongoose.Schema({
   number: String,
   sentDate: Date,
@@ -108,6 +108,41 @@ const ProformaSchema = new mongoose.Schema({
   subtotal: Number,
   tax: Number,
   total: Number,
+  
+  // ===== FREIGHT & METADATA FIELDS =====
+  freight: {
+    type: Number,
+    default: 0
+  },
+  freightTaxRate: {
+    type: Number,
+    default: 18
+  },
+  freightQty: {
+    type: Number,
+    default: 1
+  },
+  freightTax: {
+    type: Number,
+    default: 0
+  },
+  channel: {
+    type: String,
+    default: 'Domestic'
+  },
+  salesPerson: {
+    type: String,
+    default: ''
+  },
+  exchangeRate: {
+    type: String,
+    default: '1'
+  },
+  deliveryTime: {
+    type: String,
+    default: '15 Days'
+  },
+
   validUntil: Date,
   paymentTerms: String,
   deliveryTerms: String,
