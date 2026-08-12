@@ -1,4 +1,4 @@
-// models/Invoice.js - FULL UPDATED VERSION WITH INSTALLMENT & PAYMENT TRACKING
+// models/Invoice.js - FULL UPDATED VERSION WITH FREIGHT, INSURANCE & PAYMENT TRACKING
 const mongoose = require('mongoose');
 
 const InvoiceItemSchema = new mongoose.Schema({
@@ -34,7 +34,7 @@ const InvoiceItemSchema = new mongoose.Schema({
     default: false
   },
   countryOfOrigin: String,
-  
+
   // Incentive fields per item
   costPrice: {
     type: Number,
@@ -58,7 +58,7 @@ const InvoiceItemSchema = new mongoose.Schema({
   }
 });
 
-// ✅ Payment / Installment Log Schema
+// Payment / Installment Log Schema
 const PaymentLogSchema = new mongoose.Schema({
   amount: {
     type: Number,
@@ -164,6 +164,40 @@ const InvoiceSchema = new mongoose.Schema({
   notes: String,
   terms: String,
 
+  // ===== FREIGHT & INSURANCE (copied from proforma) =====
+  freight: {
+    type: Number,
+    default: 0
+  },
+  freightTaxRate: {
+    type: Number,
+    default: 18
+  },
+  freightQty: {
+    type: Number,
+    default: 1
+  },
+  freightTax: {
+    type: Number,
+    default: 0
+  },
+  insurance: {
+    type: Number,
+    default: 0
+  },
+  insuranceTaxRate: {
+    type: Number,
+    default: 18
+  },
+  insuranceQty: {
+    type: Number,
+    default: 1
+  },
+  insuranceTax: {
+    type: Number,
+    default: 0
+  },
+
   // ===== PAYMENT & INSTALLMENT TRACKING =====
   status: {
     type: String,
@@ -258,7 +292,7 @@ const InvoiceSchema = new mongoose.Schema({
 });
 
 // Pre-save hook
-InvoiceSchema.pre('save', function() {
+InvoiceSchema.pre('save', function () {
   if (this.isNew && !this.invoiceNumber) {
     const year = new Date().getFullYear();
     const count = Math.floor(Math.random() * 1000);

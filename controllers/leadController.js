@@ -111,7 +111,7 @@ exports.createLead = async (req, res) => {
 };
 
 // ============================================
-// ✅ UPDATE LEAD (FIXED TO SUPPORT PROFORMA EDITS)
+// ✅ UPDATE LEAD (FIXED - PROFORMA + markModified)
 // ============================================
 exports.updateLead = async (req, res) => {
   try {
@@ -127,7 +127,7 @@ exports.updateLead = async (req, res) => {
     }
 
     const allowedFields = [
-      'name', 'phone', 'email', 'address', 'gst', 
+      'name', 'phone', 'email', 'address', 'gst',
       'drugLicense', 'state', 'stateCode', 'source', 'notes',
       'currency', 'country', 'countryCode', 'channel', 'salesPerson'
     ];
@@ -144,15 +144,53 @@ exports.updateLead = async (req, res) => {
       lead.type = 'domestic';
     }
 
-    // 🟢 SUPPORT FOR EDITING EXISTING PROFORMA
+    // 🟢 FIXED: Update specific proforma correctly
     if (updateData.proforma) {
-      lead.proforma = { ...lead.proforma, ...updateData.proforma };
-      if (lead.proformas && lead.proformas.length > 0) {
-        const pIndex = lead.proformas.findIndex(p => p.number === updateData.proforma.number);
+      const incoming = updateData.proforma;
+      const targetNumber = updateData.proformaNumber || incoming.number;
+
+      // Update in proformas[] array
+      if (lead.proformas && lead.proformas.length > 0 && targetNumber) {
+        const pIndex = lead.proformas.findIndex(p => p.number === targetNumber);
         if (pIndex !== -1) {
-          lead.proformas[pIndex] = { ...lead.proformas[pIndex], ...updateData.proforma };
+          // Keep original number & converted flags, update everything else
+          const existing = lead.proformas[pIndex].toObject
+            ? lead.proformas[pIndex].toObject()
+            : { ...lead.proformas[pIndex] };
+
+          lead.proformas[pIndex] = {
+            ...existing,
+            ...incoming,
+            number: existing.number, // never change number
+            convertedToInvoice: existing.convertedToInvoice,
+            invoiceNumber: existing.invoiceNumber,
+            conversionDate: existing.conversionDate
+          };
         }
       }
+
+      // Also update singular proforma if it matches
+      if (lead.proforma && lead.proforma.number === targetNumber) {
+        const existing = lead.proforma.toObject
+          ? lead.proforma.toObject()
+          : { ...lead.proforma };
+
+        lead.proforma = {
+          ...existing,
+          ...incoming,
+          number: existing.number,
+          convertedToInvoice: existing.convertedToInvoice,
+          invoiceNumber: existing.invoiceNumber,
+          conversionDate: existing.conversionDate
+        };
+      } else if (!lead.proforma && incoming) {
+        // fallback
+        lead.proforma = incoming;
+      }
+
+      // 🔥 CRITICAL — without this mongoose does not save nested changes
+      lead.markModified('proformas');
+      lead.markModified('proforma');
     }
 
     if (updateData.items && updateData.items.length > 0) {
@@ -196,7 +234,9 @@ exports.updateLead = async (req, res) => {
   }
 };
 
-
+// ============================================
+// ✅ GENERATE PROFORMA (FIXED TAX + ROUNDING)
+// ============================================
 exports.generateProforma = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
@@ -320,20 +360,25 @@ exports.generateProforma = async (req, res) => {
       });
     }
 
-    // ===== TAX + FREIGHT + INSURANCE CALCULATION =====
-    const itemTaxRate = proformaItems[0]?.taxRate || 5;
-    const itemTax = (subtotal * itemTaxRate) / 100;
+    // ===== TAX + FREIGHT + INSURANCE (CORRECT – NO DOUBLE TAX) =====
+    let itemTax = 0;
+    proformaItems.forEach(item => {
+      itemTax += (item.total * (item.taxRate || 0)) / 100;
+    });
+    itemTax = Math.round(itemTax * 100) / 100;
 
     const parsedFreight = parseFloat(freight) || 0;
     const parsedFreightTaxRate = parseFloat(freightTaxRate) || 18;
-    const freightTax = (parsedFreight * parsedFreightTaxRate) / 100;
+    const freightTax = Math.round((parsedFreight * parsedFreightTaxRate) / 100 * 100) / 100;
 
     const parsedInsurance = parseFloat(insurance) || 0;
     const parsedInsuranceTaxRate = parseFloat(insuranceTaxRate) || 18;
-    const insuranceTax = (parsedInsurance * parsedInsuranceTaxRate) / 100;
+    const insuranceTax = Math.round((parsedInsurance * parsedInsuranceTaxRate) / 100 * 100) / 100;
 
     const totalTax = itemTax + freightTax + insuranceTax;
-    const grandTotal = Math.round((subtotal + parsedFreight + parsedInsurance + totalTax) * 100) / 100;
+    const rawTotal = subtotal + parsedFreight + parsedInsurance + totalTax;
+    const grandTotal = Math.round(rawTotal);                         // nearest rupee
+    const rounding = Number((grandTotal - rawTotal).toFixed(2));     // small value only
 
     // ===== Generate Proforma Number =====
     const year = new Date().getFullYear();
@@ -411,18 +456,19 @@ exports.generateProforma = async (req, res) => {
       subtotal,
       tax: totalTax,
       total: grandTotal,
+      rounding,                                    // ← stored
 
       // Freight
       freight: parsedFreight,
       freightTaxRate: parsedFreightTaxRate,
       freightQty: parseInt(freightQty) || 1,
-      freightTax: freightTax,
+      freightTax,
 
       // Insurance
       insurance: parsedInsurance,
       insuranceTaxRate: parsedInsuranceTaxRate,
       insuranceQty: parseInt(insuranceQty) || 1,
-      insuranceTax: insuranceTax,
+      insuranceTax,
 
       channel: channel || 'Domestic',
       salesPerson: salesPerson || '',
@@ -507,7 +553,7 @@ exports.generateProforma = async (req, res) => {
 };
 
 // ============================================
-// ✅ CONVERT PROFORMA TO INVOICE (WITH INITIAL PAYMENT SUPPORT)
+// ✅ CONVERT PROFORMA TO INVOICE (WITH FREIGHT + INSURANCE + INITIAL PAYMENT)
 // ============================================
 exports.convertProformaToInvoice = async (req, res) => {
   try {
@@ -516,8 +562,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    const { 
-      proformaNumber, 
+    const {
+      proformaNumber,
       force = false,
       initialPayment = 0,
       paymentMethod = 'advance',
@@ -540,7 +586,7 @@ exports.convertProformaToInvoice = async (req, res) => {
     }
 
     if (!proforma) {
-      for (let i = 0; i < lead.proformas.length; i++) {
+      for (let i = 0; i < (lead.proformas || []).length; i++) {
         if (!lead.proformas[i].convertedToInvoice) {
           proformaIndex = i;
           proforma = lead.proformas[i];
@@ -561,7 +607,7 @@ exports.convertProformaToInvoice = async (req, res) => {
     }
 
     const existingInvoice = await Invoice.findOne({ proformaNumber: proforma.number });
-    
+
     if (existingInvoice && !force) {
       return res.status(409).json({
         success: false,
@@ -581,7 +627,7 @@ exports.convertProformaToInvoice = async (req, res) => {
         try {
           const salesman = await User.findById(existingInvoice.assignedTo);
           if (salesman) {
-            const historyIndex = salesman.incentiveHistory.findIndex(
+            const historyIndex = (salesman.incentiveHistory || []).findIndex(
               h => h.invoiceNumber === existingInvoice.invoiceNumber
             );
             if (historyIndex !== -1) {
@@ -597,9 +643,9 @@ exports.convertProformaToInvoice = async (req, res) => {
           console.error('Error reversing incentive:', err);
         }
       }
-      
+
       await existingInvoice.deleteOne();
-      
+
       if (proformaIndex >= 0 && proformaIndex < lead.proformas.length) {
         lead.proformas[proformaIndex].convertedToInvoice = false;
         lead.proformas[proformaIndex].invoiceNumber = '';
@@ -609,7 +655,7 @@ exports.convertProformaToInvoice = async (req, res) => {
         lead.proforma.invoiceNumber = '';
         lead.proforma.conversionDate = null;
       }
-      
+
       await lead.save();
     }
 
@@ -622,11 +668,12 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
+    // ===== Generate Invoice Number =====
     const year = new Date().getFullYear();
     const lastInvoice = await Invoice.findOne({
       invoiceNumber: { $regex: `MPDMS${year}/` }
     }).sort({ invoiceNumber: -1 });
-    
+
     let nextNumber = 1;
     if (lastInvoice) {
       const parts = lastInvoice.invoiceNumber.split('/');
@@ -635,7 +682,7 @@ exports.convertProformaToInvoice = async (req, res) => {
         if (!isNaN(num)) nextNumber = num + 1;
       }
     }
-    
+
     let invoiceNumber = `MPDMS${year}/${String(nextNumber).padStart(3, '0')}`;
     let existingWithNumber = await Invoice.findOne({ invoiceNumber });
     while (existingWithNumber) {
@@ -644,17 +691,22 @@ exports.convertProformaToInvoice = async (req, res) => {
       existingWithNumber = await Invoice.findOne({ invoiceNumber });
     }
 
+    // ===== Incentive calculation variables =====
     let totalIncentive = 0;
     let totalProfit = 0;
     let totalValue = 0;
     let totalCost = 0;
     let overallProfitPercentage = 0;
 
-    const invoiceItems = proforma.items.map(item => {
+    // ===== BUILD INVOICE ITEMS (products + freight + insurance) =====
+    const invoiceItems = [];
+
+    // 1. Product items
+    (proforma.items || []).forEach(item => {
       const quantity = item.quantity || 1;
       const sellingPrice = item.sellingPrice || item.rate || 0;
       const costPrice = item.costPrice || 0;
-      
+
       const totalValueItem = sellingPrice * quantity;
       const totalCostItem = costPrice * quantity;
       const profitAmountItem = totalValueItem - totalCostItem;
@@ -666,7 +718,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       totalValue += totalValueItem;
       totalCost += totalCostItem;
 
-      return {
+      invoiceItems.push({
         description: item.productName || item.description || 'Product',
         quantity: item.quantity,
         rate: item.rate || item.sellingPrice || 0,
@@ -678,15 +730,74 @@ exports.convertProformaToInvoice = async (req, res) => {
         expiryDate: item.expiryDate || '',
         unit: item.unit || 'Vial',
         countryOfOrigin: item.countryOfOrigin || 'India',
-        costPrice: costPrice,
-        sellingPrice: sellingPrice,
+        costPrice,
+        sellingPrice,
         profitAmount: profitAmountItem,
         profitPercentage: profitPercentageItem,
-        incentive: incentive
-      };
+        incentive,
+        freight: false
+      });
     });
 
+    // 2. Freight as line item
+    const freightAmt = parseFloat(proforma.freight) || 0;
+    const freightTaxRate = parseFloat(proforma.freightTaxRate) || 18;
+    const freightQty = parseInt(proforma.freightQty) || 1;
+    if (freightAmt > 0) {
+      invoiceItems.push({
+        description: 'Freight / Shipping Charges',
+        quantity: freightQty,
+        rate: freightAmt,
+        taxRate: freightTaxRate,
+        amount: freightAmt * freightQty,
+        batch: '-',
+        hsCode: '',
+        mfgDate: '',
+        expiryDate: '',
+        unit: 'PCS',
+        countryOfOrigin: 'India',
+        costPrice: 0,
+        sellingPrice: freightAmt,
+        profitAmount: 0,
+        profitPercentage: 0,
+        incentive: 0,
+        freight: true
+      });
+    }
+
+    // 3. Insurance as line item
+    const insuranceAmt = parseFloat(proforma.insurance) || 0;
+    const insuranceTaxRate = parseFloat(proforma.insuranceTaxRate) || 18;
+    const insuranceQty = parseInt(proforma.insuranceQty) || 1;
+    if (insuranceAmt > 0) {
+      invoiceItems.push({
+        description: 'Insurance Charges',
+        quantity: insuranceQty,
+        rate: insuranceAmt,
+        taxRate: insuranceTaxRate,
+        amount: insuranceAmt * insuranceQty,
+        batch: '-',
+        hsCode: '',
+        mfgDate: '',
+        expiryDate: '',
+        unit: 'PCS',
+        countryOfOrigin: 'India',
+        costPrice: 0,
+        sellingPrice: insuranceAmt,
+        profitAmount: 0,
+        profitPercentage: 0,
+        incentive: 0,
+        freight: false
+      });
+    }
+
     overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+    // Prefer exact proforma totals so Invoice PDF matches Proforma PDF
+    const finalSubtotal = Number(proforma.subtotal) || 0;
+    const finalTax = Number(proforma.tax) || 0;
+    const finalTotal = Number(proforma.total) || 0;
+    const finalRounding = proforma.rounding != null ? Number(proforma.rounding) : 0;
 
     const invoiceData = {
       invoiceNumber,
@@ -706,13 +817,24 @@ exports.convertProformaToInvoice = async (req, res) => {
         stateCode: lead.stateCode || ''
       },
       items: invoiceItems,
-      subtotal: proforma.subtotal || 0,
-      tax: proforma.tax || 0,
-      total: proforma.total || 0,
-      rounding: 0,
+      subtotal: finalSubtotal,
+      tax: finalTax,
+      total: finalTotal,
+      rounding: finalRounding,
       totalInWords: proforma.totalInWords || '',
       notes: proforma.notes || 'Thanks for your business.',
       terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
+
+      // Explicit freight / insurance metadata
+      freight: freightAmt,
+      freightTaxRate,
+      freightQty,
+      freightTax: (freightAmt * freightTaxRate) / 100,
+      insurance: insuranceAmt,
+      insuranceTaxRate,
+      insuranceQty,
+      insuranceTax: (insuranceAmt * insuranceTaxRate) / 100,
+
       portOfLoading: proforma.portOfLoading || '',
       portOfDischarge: proforma.portOfDischarge || '',
       destinationCountry: proforma.destinationCountry || '',
@@ -730,8 +852,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       profitPercentage: overallProfitPercentage,
       assignedTo: lead.assignedTo?._id || lead.assignedTo,
       assignedToName: lead.assignedToName || lead.assignedTo?.name || 'Unassigned',
-      totalValue: totalValue,
-      totalCost: totalCost
+      totalValue,
+      totalCost
     };
 
     const invoice = new Invoice(invoiceData);
@@ -750,7 +872,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       invoice.paidAmount = Math.round(initPay * 100) / 100;
       invoice.dueAmount = Math.max(0, Math.round((invoice.total - initPay) * 100) / 100);
       invoice.paymentStatus = initPay >= invoice.total ? 'paid' : 'partially_paid';
-      
+
       if (initPay >= invoice.total) {
         invoice.status = 'paid';
         invoice.paymentDate = new Date();
@@ -784,15 +906,15 @@ exports.convertProformaToInvoice = async (req, res) => {
     let totalLeadIncentive = 0;
     let totalLeadProfit = 0;
     let totalLeadValue = 0;
-    
-    lead.proformas.forEach(p => {
+
+    (lead.proformas || []).forEach(p => {
       if (p.convertedToInvoice) {
         totalLeadIncentive += p.incentive || 0;
         totalLeadProfit += p.profit || 0;
         totalLeadValue += p.total || 0;
       }
     });
-    
+
     lead.totalIncentive = totalLeadIncentive;
     lead.totalProfit = totalLeadProfit;
     lead.totalValue = totalLeadValue;
@@ -803,6 +925,7 @@ exports.convertProformaToInvoice = async (req, res) => {
     if (lead.status !== 'converted') {
       lead.status = 'converted';
       lead.conversionDate = new Date();
+      lead.statusHistory = lead.statusHistory || [];
       lead.statusHistory.push({
         status: 'converted',
         date: new Date(),
@@ -814,11 +937,12 @@ exports.convertProformaToInvoice = async (req, res) => {
     await lead.save();
     await lead.populate('assignedTo', 'name email');
 
+    // Credit incentive to salesman
     if (lead.assignedTo && totalIncentive > 0) {
       try {
-        const salesman = await User.findById(lead.assignedTo._id);
+        const salesman = await User.findById(lead.assignedTo._id || lead.assignedTo);
         if (salesman) {
-          const existingHistory = salesman.incentiveHistory?.find(
+          const existingHistory = (salesman.incentiveHistory || []).find(
             h => h.invoiceNumber === invoiceNumber
           );
           if (!existingHistory) {
@@ -826,7 +950,7 @@ exports.convertProformaToInvoice = async (req, res) => {
             salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
             salesman.totalConversions = (salesman.totalConversions || 0) + 1;
             salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
-            
+
             if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
             salesman.incentiveHistory.push({
               leadId: lead._id,
@@ -840,7 +964,7 @@ exports.convertProformaToInvoice = async (req, res) => {
               date: new Date(),
               status: 'credited'
             });
-            
+
             await salesman.save();
           }
         }
@@ -875,8 +999,8 @@ exports.convertProformaToInvoice = async (req, res) => {
 
   } catch (error) {
     console.error('Convert proforma to invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: error.message || 'Server error during conversion'
     });
   }
