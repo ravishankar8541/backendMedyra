@@ -196,9 +196,7 @@ exports.updateLead = async (req, res) => {
   }
 };
 
-// ============================================
-// ✅ GENERATE PROFORMA (CRITICAL FIX FOR FREIGHT)
-// ============================================
+
 exports.generateProforma = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
@@ -219,10 +217,15 @@ exports.generateProforma = async (req, res) => {
       notes = '',
       terms = 'This is a proforma invoice. Prices are valid for 7 days.',
       totalInWords = '',
-      // 🟢 FREIGHT & METADATA DESTRUCTURED
+      // Freight
       freight = 0,
       freightTaxRate = 18,
       freightQty = 1,
+      // Insurance
+      insurance = 0,
+      insuranceTaxRate = 18,
+      insuranceQty = 1,
+      // Other
       channel = 'Domestic',
       salesPerson = '',
       exchangeRate = '1',
@@ -317,7 +320,7 @@ exports.generateProforma = async (req, res) => {
       });
     }
 
-    // 🟢 ACCURATE TAX & FREIGHT CALCULATIONS
+    // ===== TAX + FREIGHT + INSURANCE CALCULATION =====
     const itemTaxRate = proformaItems[0]?.taxRate || 5;
     const itemTax = (subtotal * itemTaxRate) / 100;
 
@@ -325,10 +328,14 @@ exports.generateProforma = async (req, res) => {
     const parsedFreightTaxRate = parseFloat(freightTaxRate) || 18;
     const freightTax = (parsedFreight * parsedFreightTaxRate) / 100;
 
-    const totalTax = itemTax + freightTax;
-    const grandTotal = Math.round((subtotal + parsedFreight + totalTax) * 100) / 100;
+    const parsedInsurance = parseFloat(insurance) || 0;
+    const parsedInsuranceTaxRate = parseFloat(insuranceTaxRate) || 18;
+    const insuranceTax = (parsedInsurance * parsedInsuranceTaxRate) / 100;
 
-    // ✅ Generate Proforma Number
+    const totalTax = itemTax + freightTax + insuranceTax;
+    const grandTotal = Math.round((subtotal + parsedFreight + parsedInsurance + totalTax) * 100) / 100;
+
+    // ===== Generate Proforma Number =====
     const year = new Date().getFullYear();
     const prefix = proformaType === 'domestic' ? 'PF' : 'PFI';
 
@@ -392,7 +399,7 @@ exports.generateProforma = async (req, res) => {
     const existingProfit = lead.profit || 0;
     const existingValue = lead.value || 0;
 
-    // 🟢 ALL FREIGHT AND METADATA INCLUDED IN newProforma OBJECT
+    // ===== CREATE PROFORMA OBJECT =====
     const newProforma = {
       number: proformaNumber,
       sentDate: new Date(),
@@ -404,11 +411,19 @@ exports.generateProforma = async (req, res) => {
       subtotal,
       tax: totalTax,
       total: grandTotal,
-      // 🟢 FREIGHT FIELDS FIXED HERE:
+
+      // Freight
       freight: parsedFreight,
       freightTaxRate: parsedFreightTaxRate,
       freightQty: parseInt(freightQty) || 1,
       freightTax: freightTax,
+
+      // Insurance
+      insurance: parsedInsurance,
+      insuranceTaxRate: parsedInsuranceTaxRate,
+      insuranceQty: parseInt(insuranceQty) || 1,
+      insuranceTax: insuranceTax,
+
       channel: channel || 'Domestic',
       salesPerson: salesPerson || '',
       exchangeRate: String(exchangeRate || '1'),
@@ -492,7 +507,7 @@ exports.generateProforma = async (req, res) => {
 };
 
 // ============================================
-// ✅ CONVERT PROFORMA TO INVOICE
+// ✅ CONVERT PROFORMA TO INVOICE (WITH INITIAL PAYMENT SUPPORT)
 // ============================================
 exports.convertProformaToInvoice = async (req, res) => {
   try {
@@ -501,7 +516,14 @@ exports.convertProformaToInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    const { proformaNumber, force = false } = req.body;
+    const { 
+      proformaNumber, 
+      force = false,
+      initialPayment = 0,
+      paymentMethod = 'advance',
+      paymentReference = '',
+      paymentNotes = ''
+    } = req.body;
 
     let proforma = null;
     let proformaIndex = -1;
@@ -713,6 +735,34 @@ exports.convertProformaToInvoice = async (req, res) => {
     };
 
     const invoice = new Invoice(invoiceData);
+
+    // ===== HANDLE INITIAL PAYMENT =====
+    const initPay = parseFloat(initialPayment) || 0;
+    if (initPay > 0) {
+      invoice.payments = [{
+        amount: initPay,
+        date: new Date(),
+        method: paymentMethod || 'advance',
+        reference: paymentReference || '',
+        notes: paymentNotes || 'Initial payment at conversion',
+        receivedBy: req.user.id
+      }];
+      invoice.paidAmount = Math.round(initPay * 100) / 100;
+      invoice.dueAmount = Math.max(0, Math.round((invoice.total - initPay) * 100) / 100);
+      invoice.paymentStatus = initPay >= invoice.total ? 'paid' : 'partially_paid';
+      
+      if (initPay >= invoice.total) {
+        invoice.status = 'paid';
+        invoice.paymentDate = new Date();
+      } else {
+        invoice.status = 'sent';
+      }
+    } else {
+      invoice.paidAmount = 0;
+      invoice.dueAmount = invoice.total;
+      invoice.paymentStatus = 'unpaid';
+    }
+
     await invoice.save();
 
     lead._skipAutoCalculate = true;

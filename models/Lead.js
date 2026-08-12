@@ -126,6 +126,22 @@ const ProformaSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  insurance: {
+  type: Number,
+  default: 0
+},
+insuranceTaxRate: {
+  type: Number,
+  default: 18
+},
+insuranceQty: {
+  type: Number,
+  default: 1
+},
+insuranceTax: {
+  type: Number,
+  default: 0
+},
   channel: {
     type: String,
     default: 'Domestic'
