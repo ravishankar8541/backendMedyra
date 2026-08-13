@@ -300,7 +300,9 @@ exports.generateProforma = async (req, res) => {
     for (const item of items) {
       const quantity = parseInt(item.quantity) || 1;
       const rate = parseFloat(item.rate) || 0;
-      const taxRate = parseFloat(item.taxRate) || 18;
+      const taxRate = item.taxRate !== undefined && item.taxRate !== null && item.taxRate !== ''
+  ? parseFloat(item.taxRate)
+  : 18;
       const total = quantity * rate;
       subtotal += total;
 
@@ -368,11 +370,15 @@ exports.generateProforma = async (req, res) => {
     itemTax = Math.round(itemTax * 100) / 100;
 
     const parsedFreight = parseFloat(freight) || 0;
-    const parsedFreightTaxRate = parseFloat(freightTaxRate) || 18;
+    const parsedFreightTaxRate = freightTaxRate !== undefined && freightTaxRate !== null && freightTaxRate !== ''
+  ? parseFloat(freightTaxRate)
+  : 18;
     const freightTax = Math.round((parsedFreight * parsedFreightTaxRate) / 100 * 100) / 100;
 
     const parsedInsurance = parseFloat(insurance) || 0;
-    const parsedInsuranceTaxRate = parseFloat(insuranceTaxRate) || 18;
+ const parsedInsuranceTaxRate = insuranceTaxRate !== undefined && insuranceTaxRate !== null && insuranceTaxRate !== ''
+  ? parseFloat(insuranceTaxRate)
+  : 18;
     const insuranceTax = Math.round((parsedInsurance * parsedInsuranceTaxRate) / 100 * 100) / 100;
 
     const totalTax = itemTax + freightTax + insuranceTax;
@@ -834,6 +840,15 @@ exports.convertProformaToInvoice = async (req, res) => {
       insuranceTaxRate,
       insuranceQty,
       insuranceTax: (insuranceAmt * insuranceTaxRate) / 100,
+      // ===== SHIPPING FIELDS (only for Invoice) =====
+  salesPerson: proforma.salesPerson || lead.assignedToName || '',
+  channel: proforma.channel || '',
+  placeOfReceiptOfContainer: proforma.placeOfReceiptOfContainer || '',
+  incoterms: proforma.incoterms || '',
+  wayRoute: proforma.wayRoute || '',
+  sgsNo: proforma.sgsNo || '',
+  approxShipperCarton: proforma.approxShipperCarton || '',
+  shipperCartonSize: proforma.shipperCartonSize || '',
 
       portOfLoading: proforma.portOfLoading || '',
       portOfDischarge: proforma.portOfDischarge || '',

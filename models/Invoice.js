@@ -224,6 +224,14 @@ const InvoiceSchema = new mongoose.Schema({
   paymentReference: String,
 
   // International fields
+  salesPerson: { type: String, default: '' },
+channel: { type: String, default: '' },
+placeOfReceiptOfContainer: { type: String, default: '' },
+incoterms: { type: String, default: '' },
+wayRoute: { type: String, default: '' },
+sgsNo: { type: String, default: '' },
+approxShipperCarton: { type: String, default: '' },
+shipperCartonSize: { type: String, default: '' },
   portOfLoading: String,
   portOfDischarge: String,
   shippingMark: String,

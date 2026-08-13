@@ -49,7 +49,7 @@ const LeadItemSchema = new mongoose.Schema({
   },
   taxRate: {
     type: Number,
-    default: 18
+    default: 0
   },
   profitAmount: {
     type: Number,
@@ -116,7 +116,7 @@ const ProformaSchema = new mongoose.Schema({
   },
   freightTaxRate: {
     type: Number,
-    default: 18
+    default: 0
   },
   freightQty: {
     type: Number,
@@ -132,7 +132,7 @@ const ProformaSchema = new mongoose.Schema({
 },
 insuranceTaxRate: {
   type: Number,
-  default: 18
+  default: 0
 },
 insuranceQty: {
   type: Number,
