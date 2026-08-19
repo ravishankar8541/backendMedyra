@@ -39,6 +39,8 @@ const currencyRoutes = require('../routes/currencyRoutes');
 const uploadRoutes = require('../routes/uploadRoutes'); 
 const quotationRoutes = require('../routes/quotationRoutes');
 const purchaseReturnRoutes = require('../routes/purchaseReturnRoutes');
+const unitRoutes = require('../routes/unitRoutes');
+const categoryRoutes = require('../routes/categoryRoutes');
 
 const app = express();
 
@@ -185,6 +187,9 @@ mountRoute('/api/currency', currencyRoutes, 'Currency Routes');
 mountRoute('/api/uploads', uploadRoutes, 'Upload Routes'); 
 mountRoute('/api/quotations', quotationRoutes, 'Quotation Routes');
 mountRoute('/api/purchase-returns', purchaseReturnRoutes, 'Purchase Return Routes');
+mountRoute('/api/units', unitRoutes, 'Unit Routes');
+mountRoute('/api/categories', categoryRoutes, 'Category Routes')
+
 
 app.get('/', (req, res) => {
   res.status(200).json({
