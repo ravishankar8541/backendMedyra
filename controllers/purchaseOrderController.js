@@ -1,4 +1,4 @@
-// controllers/purchaseOrderController.js - FULL FIXED GST & BATCH VERSION
+// controllers/purchaseOrderController.js
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 
@@ -18,6 +18,7 @@ exports.createPurchaseOrder = async (req, res) => {
       ccEmail,
       items, 
       notes, 
+      date,
       expectedDate,
       gstType,
       currency,
@@ -37,7 +38,7 @@ exports.createPurchaseOrder = async (req, res) => {
 
     // Process & Map Items with Item-Level GST & Batch Info
     const formattedItems = items.map(item => {
-      const qty = parseInt(item.quantity) || 0;
+      const qty = parseFloat(item.quantity) || 0;
       const rate = parseFloat(item.unitPrice) || 0;
       const taxRate = parseFloat(item.taxRate) || 0;
       const itemSubtotal = qty * rate;
@@ -76,7 +77,7 @@ exports.createPurchaseOrder = async (req, res) => {
       calcIgst = igst !== undefined ? parseFloat(igst) : calcTotalTax;
     }
 
-    // ✅ FIX: Safe PO Number Generation (Handles Deletions & Concurrency)
+    // Safe PO Number Generation
     const year = new Date().getFullYear();
     const lastOrder = await PurchaseOrder.findOne({
       poNumber: new RegExp(`^PO-${year}/`)
@@ -95,7 +96,6 @@ exports.createPurchaseOrder = async (req, res) => {
 
     let poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
 
-    // Extra safety guard: ensure no collision if poNumber exists
     while (await PurchaseOrder.exists({ poNumber })) {
       nextNumber++;
       poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
@@ -111,7 +111,7 @@ exports.createPurchaseOrder = async (req, res) => {
       supplierContact: supplierContact || 'N/A',
       supplierEmail: supplierEmail || '',
       ccEmail: ccEmail || '',
-      date: new Date().toISOString().split('T')[0],
+      date: date || new Date().toISOString().split('T')[0],
       expectedDate: expectedDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       items: formattedItems,
       currency: currency || 'INR',
@@ -127,13 +127,13 @@ exports.createPurchaseOrder = async (req, res) => {
       notes: notes || 'No notes',
       createdFromAlert: req.body.fromAlert || false,
       alertId: req.body.alertId || null,
-      createdBy: req.user.id,
+      createdBy: req.user?.id || req.user?._id,
       emailSent: false
     });
 
     await purchaseOrder.save();
 
-    console.log(`✅ Purchase Order ${poNumber} created with full GST breakdown`);
+    console.log(`✅ Purchase Order ${poNumber} created successfully`);
 
     res.status(201).json({
       success: true,
@@ -164,7 +164,7 @@ exports.getPurchaseOrders = async (req, res) => {
     }
 
     const orders = await PurchaseOrder.find(query)
-      .populate('createdBy', 'name')
+      .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
@@ -188,7 +188,7 @@ exports.getPurchaseOrders = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Get purchase orders error:', error);
+    console.error('❌ Get purchase orders error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -199,7 +199,7 @@ exports.getPurchaseOrders = async (req, res) => {
 exports.getPurchaseOrder = async (req, res) => {
   try {
     const order = await PurchaseOrder.findById(req.params.id)
-      .populate('createdBy', 'name');
+      .populate('createdBy', 'name email');
 
     if (!order) {
       return res.status(404).json({ success: false, message: 'Purchase order not found' });
@@ -207,7 +207,7 @@ exports.getPurchaseOrder = async (req, res) => {
 
     res.json({ success: true, data: order });
   } catch (error) {
-    console.error('Get purchase order error:', error);
+    console.error('❌ Get purchase order error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -237,7 +237,7 @@ exports.updatePurchaseOrderStatus = async (req, res) => {
       message: `Order status updated to ${status}`
     });
   } catch (error) {
-    console.error('Update order status error:', error);
+    console.error('❌ Update order status error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -255,7 +255,7 @@ exports.deletePurchaseOrder = async (req, res) => {
     await order.deleteOne();
     res.json({ success: true, message: 'Purchase order deleted successfully' });
   } catch (error) {
-    console.error('Delete purchase order error:', error);
+    console.error('❌ Delete purchase order error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

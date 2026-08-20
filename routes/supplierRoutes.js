@@ -11,7 +11,7 @@ const {
 } = require('../controllers/supplierController');
 const { protect, restrictTo } = require('../middleware/auth');
 
-// Indian State Codes
+// Complete Indian State & UT Codes Map
 const GST_STATE_MAP = {
   "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
   "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan",
@@ -19,10 +19,10 @@ const GST_STATE_MAP = {
   "13": "Nagaland", "14": "Manipur", "15": "Mizoram", "16": "Tripura",
   "17": "Meghalaya", "18": "Assam", "19": "West Bengal", "20": "Jharkhand",
   "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
-  "26": "Dadra and Nagar Haveli", "27": "Maharashtra", "29": "Karnataka",
-  "30": "Goa", "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
-  "34": "Puducherry", "35": "Andaman and Nicobar", "36": "Telangana",
-  "37": "Andhra Pradesh", "38": "Ladakh"
+  "25": "Daman and Diu", "26": "Dadra and Nagar Haveli", "27": "Maharashtra", "28": "Andhra Pradesh (Old)",
+  "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala",
+  "33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman and Nicobar", "36": "Telangana",
+  "37": "Andhra Pradesh", "38": "Ladakh", "97": "Other Territory", "99": "Centre Jurisdiction"
 };
 
 // PAN 4th Character Constitution Decoder
@@ -39,114 +39,140 @@ const PAN_CONSTITUTION_MAP = {
   'G': 'Government Agency'
 };
 
-// ===== VALIDATION RULES =====
+// Supplier validation rules
 const supplierValidation = [
-  body('companyName').notEmpty().withMessage('Company name is required'),
-  body('contactPerson').notEmpty().withMessage('Contact person is required'),
+  body('companyName').trim().notEmpty().withMessage('Company name is required'),
+  body('contactPerson').trim().notEmpty().withMessage('Contact person is required'),
   body('email').isEmail().withMessage('Valid email is required'),
-  body('phone').notEmpty().withMessage('Phone number is required')
+  body('phone').trim().notEmpty().withMessage('Phone number is required')
 ];
 
-// Protect all routes
+// Protect all routes with auth middleware
 router.use(protect);
 
 // ====================================================================
-// GST VERIFICATION ROUTE (Smart Live + Decoded Lookup)
+// GST VERIFICATION ROUTE
 // GET /api/suppliers/verify-gst/:gstin
 // ====================================================================
 router.get('/verify-gst/:gstin', async (req, res) => {
-  const gstin = (req.params.gstin || '').trim().toUpperCase();
+  try {
+    const gstin = (req.params.gstin || '').trim().toUpperCase();
 
-  // 1. Strict 15-Digit Format Validation
-  const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
-  if (!gstRegex.test(gstin)) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "❌ Invalid GST Number format! Must be 15 characters (e.g. 07AAECJ2786K1Z5)" 
-    });
-  }
-
-  const stateCode = gstin.substring(0, 2);
-  const pan = gstin.substring(2, 12);
-  const stateName = GST_STATE_MAP[stateCode];
-
-  if (!stateName) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `❌ Invalid State Code (${stateCode}) in GST number!` 
-    });
-  }
-
-  const panTypeChar = pan.charAt(3);
-  const constitution = PAN_CONSTITUTION_MAP[panTypeChar] || "Registered Business Entity";
-
-  // Optional: Agar aapke paas Free API Key hai toh .env me GSTIN_API_KEY daal sakte hain
-  const apiKey = process.env.GSTIN_API_KEY || "";
-
-  let liveData = null;
-
-  // 2. Try fetching live data if API Key or Public Gateway is reachable
-  if (apiKey) {
-    try {
-      const response = await axios.get(`https://sheet.gstincheck.co.in/check/${apiKey}/${gstin}`, { timeout: 5000 });
-      if (response.data && response.data.flag) {
-        liveData = response.data.data;
-      }
-    } catch (err) {
-      console.warn("External GST API check failed, falling back to smart decoder.");
+    // 1. Format validation (15 alphanumeric characters)
+    const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z|z][0-9A-Z]{1}$/;
+    if (!gstRegex.test(gstin)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid GSTIN format. Must be 15 characters (e.g. 07AAECJ2786K1Z5)',
+      });
     }
-  }
 
-  // 3. Construct Verified Data
-  if (liveData) {
-    const addr = liveData.pradr?.addr || {};
-    const fullAddress = [addr.bno, addr.bnm, addr.st, addr.loc].filter(Boolean).join(', ') || liveData.address || '';
+    const stateCode = gstin.substring(0, 2);
+    const pan = gstin.substring(2, 12);
+    const stateName = GST_STATE_MAP[stateCode] || 'India';
+    const panTypeChar = pan.charAt(3);
+    const constitution = PAN_CONSTITUTION_MAP[panTypeChar] || 'Registered Business Entity';
 
-    return res.json({
-      success: true,
-      data: {
-        gstin: gstin,
-        pan: pan,
-        legalName: liveData.lgnm || liveData.tradeNam || "Verified Taxpayer",
-        tradeName: liveData.tradeNam || liveData.lgnm || "N/A",
-        status: liveData.sts || "Active",
-        taxpayerType: liveData.dty || "Regular",
-        constitution: liveData.ctb || constitution,
-        regDate: liveData.rgdt || "Registered",
-        address: fullAddress,
-        city: addr.dst || addr.city || stateName,
-        state: addr.stcd || stateName,
-        stateCode: stateCode,
-        pincode: addr.pncd || "",
-        stateJurisdiction: liveData.stj || "State Tax Division",
-        centerJurisdiction: liveData.ctj || "Central Tax Division",
-        natureOfBusiness: Array.isArray(liveData.nba) ? liveData.nba.join(", ") : "Wholesale / Supply"
-      }
+    const apiKey = process.env.GSTIN_API_KEY;
+
+    if (!apiKey) {
+      console.error('❌ GSTIN_API_KEY is missing from environment variables (.env)');
+      return res.status(500).json({
+        success: false,
+        message: 'GST verification service is not configured on server (Missing API Key).',
+      });
+    }
+
+    const url = `https://sheet.gstincheck.co.in/check/${apiKey}/${gstin}`;
+
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    const resBody = response.data;
+
+    // Check if API returned a successful response
+    const isSuccess = resBody && (
+      resBody.flag === true || 
+      resBody.flag === 'true' || 
+      resBody.status === true || 
+      resBody.status === 1
+    );
+
+    if (isSuccess && resBody.data) {
+      const liveData = resBody.data;
+
+      // Handle nested or flat address structures
+      const addr = liveData.pradr?.addr || liveData.pradr || {};
+
+      const fullAddress = [
+        addr.bno,
+        addr.bnm,
+        addr.flno,
+        addr.st,
+        addr.loc,
+        addr.dst,
+      ]
+        .filter(Boolean)
+        .join(', ');
+
+      return res.json({
+        success: true,
+        source: 'live',
+        data: {
+          gstin: liveData.gstin || gstin,
+          pan: pan,
+          legalName: liveData.lgnm || liveData.legalName || 'N/A',
+          tradeName: liveData.tradeNam || liveData.tradeName || liveData.lgnm || 'N/A',
+          status: liveData.sts || liveData.status || 'Active',
+          taxpayerType: liveData.dty || liveData.taxpayerType || 'Regular',
+          constitution: liveData.ctb || constitution,
+          regDate: liveData.rgdt || 'N/A',
+          address: fullAddress || liveData.address || '',
+          city: addr.dst || addr.city || addr.loc || '',
+          state: addr.stcd || stateName,
+          stateCode: stateCode,
+          pincode: addr.pncd || addr.pincode || '',
+          stateJurisdiction: liveData.stj || '',
+          centerJurisdiction: liveData.ctj || '',
+          natureOfBusiness: Array.isArray(liveData.nba)
+            ? liveData.nba.join(', ')
+            : liveData.nba || '',
+        },
+      });
+    }
+
+    // Handled failure from third-party API
+    return res.status(404).json({
+      success: false,
+      message: resBody?.message || 'GSTIN not found on Government GST Portal or API credits exhausted.',
+    });
+
+  } catch (err) {
+    console.error('❌ GST Verification Error:', err.message);
+
+    if (err.response?.status === 401 || err.response?.status === 403) {
+      return res.status(502).json({
+        success: false,
+        message: 'Invalid or expired GSTIN API Key. Check server configuration.',
+      });
+    }
+
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      return res.status(504).json({
+        success: false,
+        message: 'GST verification service request timed out. Please try again.',
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: err.response?.data?.message || err.message || 'Error occurred while verifying GST number.',
     });
   }
-
-  // 4. Smart Instant Fallback (Guaranteed to return Real Decoded Info)
-  return res.json({
-    success: true,
-    data: {
-      gstin: gstin,
-      pan: pan,
-      legalName: `Taxpayer (${constitution})`,
-      tradeName: `Business Unit - ${stateName}`,
-      status: "Active",
-      taxpayerType: "Regular Taxpayer",
-      constitution: constitution,
-      regDate: "Verified under GST Act",
-      address: `Registered Taxpayer Address, ${stateName}`,
-      city: stateName,
-      state: stateName,
-      stateCode: stateCode,
-      pincode: "",
-      stateJurisdiction: `${stateName} State Division`,
-      centerJurisdiction: `${stateName} Central Circle`,
-      natureOfBusiness: "Manufacturer / Wholesaler / Services"
-    }
-  });
 });
 
 // ============================================
