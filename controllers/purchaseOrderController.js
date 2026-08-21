@@ -2,48 +2,27 @@
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 
-// ============================================
-// CREATE PURCHASE ORDER
-// ============================================
 exports.createPurchaseOrder = async (req, res) => {
   try {
     const { 
-      supplier, 
-      supplierId,
-      supplierName,
-      supplierAddress, 
-      supplierGST, 
-      supplierContact, 
-      supplierEmail,
-      ccEmail,
-      items, 
-      notes, 
-      date,
-      expectedDate,
-      gstType,
-      currency,
-      exchangeRate,
-      subtotal,
-      totalTax,
-      igst,
-      cgst,
-      sgst,
-      total
+      supplier, supplierId, supplierName, supplierAddress, supplierGST, 
+      supplierContact, supplierEmail, supplierCountry, channel,
+      ccEmail, items, notes, date, expectedDate,
+      gstType, currency, exchangeRate,
+      subtotal, totalTax, igst, cgst, sgst, total,
+      freight, insurance, inventoryCharges, chargesSubtotal, chargesTax
     } = req.body;
 
-    // Validate items
     if (!items || items.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one item required' });
     }
 
-    // Process & Map Items with Item-Level GST & Batch Info
     const formattedItems = items.map(item => {
       const qty = parseFloat(item.quantity) || 0;
       const rate = parseFloat(item.unitPrice) || 0;
       const taxRate = parseFloat(item.taxRate) || 0;
       const itemSubtotal = qty * rate;
       const itemTax = itemSubtotal * (taxRate / 100);
-      const itemTotalWithTax = itemSubtotal + itemTax;
 
       return {
         product: item.product || item.productId || 'N/A',
@@ -55,19 +34,43 @@ exports.createPurchaseOrder = async (req, res) => {
         sku: item.sku || '',
         hsn: item.hsn || '',
         quantity: qty,
+        receivedQty: 0,
+        remainingQty: qty,
         unit: item.unit || 'Strips',
         unitPrice: rate,
         taxRate: taxRate,
         total: itemSubtotal,
-        totalWithTax: item.totalWithTax ? parseFloat(item.totalWithTax) : itemTotalWithTax,
+        totalWithTax: itemSubtotal + itemTax,
         isBatchProduct: item.isBatchProduct !== undefined ? item.isBatchProduct : true
       };
     });
 
-    // Compute or Fallback Order Totals
-    const calcSubtotal = subtotal !== undefined ? parseFloat(subtotal) : formattedItems.reduce((sum, i) => sum + i.total, 0);
-    const calcTotalTax = totalTax !== undefined ? parseFloat(totalTax) : formattedItems.reduce((sum, i) => sum + (i.totalWithTax - i.total), 0);
-    const calcGrandTotal = total !== undefined ? parseFloat(total) : (calcSubtotal + calcTotalTax);
+    const freightData = {
+      amount: parseFloat(freight?.amount) || 0,
+      taxRate: parseFloat(freight?.taxRate) || 0,
+      taxAmount: parseFloat(freight?.taxAmount) || 0
+    };
+    const insuranceData = {
+      amount: parseFloat(insurance?.amount) || 0,
+      taxRate: parseFloat(insurance?.taxRate) || 0,
+      taxAmount: parseFloat(insurance?.taxAmount) || 0
+    };
+    const inventoryData = {
+      amount: parseFloat(inventoryCharges?.amount) || 0,
+      taxRate: parseFloat(inventoryCharges?.taxRate) || 0,
+      taxAmount: parseFloat(inventoryCharges?.taxAmount) || 0
+    };
+
+    const calcSubtotal = subtotal !== undefined ? parseFloat(subtotal) : 
+      formattedItems.reduce((sum, i) => sum + i.total, 0);
+    const calcChargesSubtotal = chargesSubtotal !== undefined ? parseFloat(chargesSubtotal) : 
+      freightData.amount + insuranceData.amount + inventoryData.amount;
+    const calcChargesTax = chargesTax !== undefined ? parseFloat(chargesTax) : 
+      freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
+    const calcTotalTax = totalTax !== undefined ? parseFloat(totalTax) : 
+      formattedItems.reduce((sum, i) => sum + (i.totalWithTax - i.total), 0) + calcChargesTax;
+    const calcGrandTotal = total !== undefined ? parseFloat(total) : 
+      calcSubtotal + calcChargesSubtotal + calcTotalTax;
 
     let calcIgst = 0, calcCgst = 0, calcSgst = 0;
     if (gstType === 'cgst_sgst') {
@@ -77,7 +80,6 @@ exports.createPurchaseOrder = async (req, res) => {
       calcIgst = igst !== undefined ? parseFloat(igst) : calcTotalTax;
     }
 
-    // Safe PO Number Generation
     const year = new Date().getFullYear();
     const lastOrder = await PurchaseOrder.findOne({
       poNumber: new RegExp(`^PO-${year}/`)
@@ -88,14 +90,11 @@ exports.createPurchaseOrder = async (req, res) => {
       const parts = lastOrder.poNumber.split('/');
       if (parts.length === 2) {
         const lastSeq = parseInt(parts[1], 10);
-        if (!isNaN(lastSeq)) {
-          nextNumber = lastSeq + 1;
-        }
+        if (!isNaN(lastSeq)) nextNumber = lastSeq + 1;
       }
     }
 
     let poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
-
     while (await PurchaseOrder.exists({ poNumber })) {
       nextNumber++;
       poNumber = `PO-${year}/${String(nextNumber).padStart(3, '0')}`;
@@ -110,10 +109,13 @@ exports.createPurchaseOrder = async (req, res) => {
       supplierGST: supplierGST || 'N/A',
       supplierContact: supplierContact || 'N/A',
       supplierEmail: supplierEmail || '',
+      supplierCountry: supplierCountry || 'India',
+      channel: channel || 'domestic',
       ccEmail: ccEmail || '',
       date: date || new Date().toISOString().split('T')[0],
       expectedDate: expectedDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       items: formattedItems,
+      purchaserName: req.body.purchaserName || '',
       currency: currency || 'INR',
       exchangeRate: parseFloat(exchangeRate) || 1,
       subtotal: calcSubtotal,
@@ -123,17 +125,22 @@ exports.createPurchaseOrder = async (req, res) => {
       cgst: calcCgst,
       sgst: calcSgst,
       total: calcGrandTotal,
+      freight: freightData,
+      insurance: insuranceData,
+      inventoryCharges: inventoryData,
+      chargesSubtotal: calcChargesSubtotal,
+      chargesTax: calcChargesTax,
       status: 'pending',
       notes: notes || 'No notes',
       createdFromAlert: req.body.fromAlert || false,
       alertId: req.body.alertId || null,
       createdBy: req.user?.id || req.user?._id,
-      emailSent: false
+      emailSent: false,
+      partiallyReceived: false,
+      receivedPercentage: 0
     });
 
     await purchaseOrder.save();
-
-    console.log(`✅ Purchase Order ${poNumber} created successfully`);
 
     res.status(201).json({
       success: true,
@@ -146,15 +153,20 @@ exports.createPurchaseOrder = async (req, res) => {
   }
 };
 
-// ============================================
-// GET ALL PURCHASE ORDERS
-// ============================================
 exports.getPurchaseOrders = async (req, res) => {
   try {
     const { page = 1, limit = 10, status, search } = req.query;
-
     const query = {};
-    if (status && status !== 'all') query.status = status;
+
+    if (status && status !== 'all') {
+      const statuses = status.split(',').map(s => s.trim());
+      if (statuses.length === 1) {
+        query.status = statuses[0];
+      } else {
+        query.status = { $in: statuses };
+      }
+    }
+
     if (search) {
       query.$or = [
         { poNumber: { $regex: search, $options: 'i' } },
@@ -175,11 +187,25 @@ exports.getPurchaseOrders = async (req, res) => {
     const shipped = await PurchaseOrder.countDocuments({ status: 'shipped' });
     const delivered = await PurchaseOrder.countDocuments({ status: 'delivered' });
     const cancelled = await PurchaseOrder.countDocuments({ status: 'cancelled' });
+    const partiallyReceived = await PurchaseOrder.countDocuments({ status: 'partially_received' });
+
+    // Calculate total received quantities
+    const ordersWithReceipts = orders.map(order => {
+      const totalOrdered = order.items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+      const totalReceived = order.items.reduce((sum, i) => sum + (Number(i.receivedQty) || 0), 0);
+      return {
+        ...order.toObject(),
+        totalOrdered,
+        totalReceived,
+        remainingQty: totalOrdered - totalReceived,
+        receivedPercentage: totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0
+      };
+    });
 
     res.json({
       success: true,
-      data: orders,
-      stats: { total, pending, shipped, delivered, cancelled },
+      data: ordersWithReceipts,
+      stats: { total, pending, shipped, delivered, cancelled, partiallyReceived },
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -193,9 +219,6 @@ exports.getPurchaseOrders = async (req, res) => {
   }
 };
 
-// ============================================
-// GET SINGLE PURCHASE ORDER
-// ============================================
 exports.getPurchaseOrder = async (req, res) => {
   try {
     const order = await PurchaseOrder.findById(req.params.id)
@@ -205,16 +228,25 @@ exports.getPurchaseOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Purchase order not found' });
     }
 
-    res.json({ success: true, data: order });
+    const totalOrdered = order.items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    const totalReceived = order.items.reduce((sum, i) => sum + (Number(i.receivedQty) || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        ...order.toObject(),
+        totalOrdered,
+        totalReceived,
+        remainingQty: totalOrdered - totalReceived,
+        receivedPercentage: totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0
+      }
+    });
   } catch (error) {
     console.error('❌ Get purchase order error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ============================================
-// UPDATE PURCHASE ORDER STATUS
-// ============================================
 exports.updatePurchaseOrderStatus = async (req, res) => {
   try {
     const { status } = req.body;
@@ -242,9 +274,6 @@ exports.updatePurchaseOrderStatus = async (req, res) => {
   }
 };
 
-// ============================================
-// DELETE PURCHASE ORDER
-// ============================================
 exports.deletePurchaseOrder = async (req, res) => {
   try {
     const order = await PurchaseOrder.findById(req.params.id);

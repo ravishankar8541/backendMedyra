@@ -1,9 +1,32 @@
-// controllers/purchaseReturnController.js
 const PurchaseReturn = require('../models/PurchaseReturn');
 const Product = require('../models/Product');
+const Supplier = require('../models/Supplier');
 
 // ============================================
-// CREATE PURCHASE RETURN & DEDUCT STOCK
+// GENERATE RETURN NUMBER
+// ============================================
+const generateReturnNumber = async () => {
+  const year = new Date().getFullYear();
+  const last = await PurchaseReturn.findOne({
+    returnNumber: new RegExp(`^PR-${year}/`)
+  }).sort({ createdAt: -1 });
+
+  let next = 1;
+  if (last?.returnNumber) {
+    const parts = last.returnNumber.split('/');
+    if (parts[1]) next = parseInt(parts[1], 10) + 1;
+  }
+
+  let returnNumber = `PR-${year}/${String(next).padStart(3, '0')}`;
+  while (await PurchaseReturn.exists({ returnNumber })) {
+    next++;
+    returnNumber = `PR-${year}/${String(next).padStart(3, '0')}`;
+  }
+  return returnNumber;
+};
+
+// ============================================
+// CREATE PURCHASE RETURN - COMPLETE
 // ============================================
 exports.createPurchaseReturn = async (req, res) => {
   try {
@@ -23,10 +46,7 @@ exports.createPurchaseReturn = async (req, res) => {
       notes,
       gstType,
       currency,
-      exchangeRate,
-      subtotal,
-      totalTax,
-      total
+      exchangeRate
     } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -37,30 +57,13 @@ exports.createPurchaseReturn = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Supplier is required' });
     }
 
-    // Safe PR Number Generation
-    const year = new Date().getFullYear();
-    const lastReturn = await PurchaseReturn.findOne({
-      returnNumber: new RegExp(`^PR-${year}/`)
-    }).sort({ createdAt: -1 });
-
-    let nextSeq = 1;
-    if (lastReturn && lastReturn.returnNumber) {
-      const parts = lastReturn.returnNumber.split('/');
-      if (parts.length === 2) {
-        const lastNum = parseInt(parts[1], 10);
-        if (!isNaN(lastNum)) nextSeq = lastNum + 1;
-      }
-    }
-
-    let returnNumber = `PR-${year}/${String(nextSeq).padStart(3, '0')}`;
-    while (await PurchaseReturn.exists({ returnNumber })) {
-      nextSeq++;
-      returnNumber = `PR-${year}/${String(nextSeq).padStart(3, '0')}`;
-    }
-
+    const returnNumber = await generateReturnNumber();
+    
+    let subtotal = 0;
+    let totalTax = 0;
     const formattedItems = [];
 
-    // Deduct stock for each item
+    // Process each item - Deduct stock
     for (const item of items) {
       const productId = item.product || item.productId;
       const qty = parseInt(item.quantity) || 0;
@@ -70,9 +73,13 @@ exports.createPurchaseReturn = async (req, res) => {
       const itemTax = itemSubtotal * (taxRate / 100);
       const itemTotalWithTax = itemSubtotal + itemTax;
 
+      subtotal += itemSubtotal;
+      totalTax += itemTax;
+
       if (productId) {
         const product = await Product.findById(productId);
         if (product) {
+          // Deduct from batch or general stock
           if (product.productType === 'batch' && item.batchNumber && item.batchNumber !== 'N/A') {
             const batchIdx = product.batches.findIndex(b => b.batchNumber === item.batchNumber);
             if (batchIdx !== -1) {
@@ -104,17 +111,24 @@ exports.createPurchaseReturn = async (req, res) => {
       });
     }
 
-    const calcSubtotal = subtotal !== undefined ? parseFloat(subtotal) : formattedItems.reduce((s, i) => s + i.total, 0);
-    const calcTax = totalTax !== undefined ? parseFloat(totalTax) : formattedItems.reduce((s, i) => s + (i.totalWithTax - i.total), 0);
-    const calcGrandTotal = total !== undefined ? parseFloat(total) : (calcSubtotal + calcTax);
+    const grandTotal = subtotal + totalTax;
+
+    // Get supplier details if not provided
+    let supplierData = supplier;
+    if (supplierId && !supplierName) {
+      const supp = await Supplier.findById(supplierId);
+      if (supp) {
+        supplierData = supp.companyName;
+      }
+    }
 
     const purchaseReturn = new PurchaseReturn({
       returnNumber,
       poNumber: poNumber || 'N/A',
       purchaseOrder: purchaseOrder || null,
-      supplier: supplier || supplierName || 'N/A',
+      supplier: supplierData || supplierName || '',
       supplierId,
-      supplierName: supplierName || supplier || '',
+      supplierName: supplierName || supplierData || '',
       supplierAddress: supplierAddress || 'N/A',
       supplierGST: supplierGST || 'N/A',
       supplierContact: supplierContact || 'N/A',
@@ -123,13 +137,13 @@ exports.createPurchaseReturn = async (req, res) => {
       items: formattedItems,
       currency: currency || 'INR',
       exchangeRate: parseFloat(exchangeRate) || 1,
-      subtotal: calcSubtotal,
+      subtotal: subtotal,
       gstType: gstType || 'igst',
-      totalTax: calcTax,
-      igst: gstType === 'igst' ? calcTax : 0,
-      cgst: gstType === 'cgst_sgst' ? (calcTax / 2) : 0,
-      sgst: gstType === 'cgst_sgst' ? (calcTax / 2) : 0,
-      total: calcGrandTotal,
+      totalTax: totalTax,
+      igst: gstType === 'igst' ? totalTax : 0,
+      cgst: gstType === 'cgst_sgst' ? (totalTax / 2) : 0,
+      sgst: gstType === 'cgst_sgst' ? (totalTax / 2) : 0,
+      total: grandTotal,
       returnReason: returnReason || 'Stock return to supplier',
       status: 'completed',
       notes: notes || '',
@@ -171,6 +185,7 @@ exports.getPurchaseReturns = async (req, res) => {
 
     const returns = await PurchaseReturn.find(query)
       .populate('createdBy', 'name')
+      .populate('supplierId', 'companyName')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
@@ -199,7 +214,8 @@ exports.getPurchaseReturns = async (req, res) => {
 exports.getPurchaseReturn = async (req, res) => {
   try {
     const purchaseReturn = await PurchaseReturn.findById(req.params.id)
-      .populate('createdBy', 'name');
+      .populate('createdBy', 'name')
+      .populate('supplierId', 'companyName gstNumber phone email');
 
     if (!purchaseReturn) {
       return res.status(404).json({ success: false, message: 'Purchase return not found' });
@@ -221,6 +237,8 @@ exports.deletePurchaseReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Purchase return not found' });
     }
 
+    // Optionally reverse stock deduction here
+    
     await purchaseReturn.deleteOne();
     res.json({ success: true, message: 'Purchase return deleted successfully' });
   } catch (error) {
