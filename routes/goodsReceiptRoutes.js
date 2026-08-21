@@ -7,33 +7,41 @@ const {
   getGRNs,
   getGRN,
   deleteGRN,
-  generatePurchaseInvoice,
-  addPayment,
-  getInvoice,
-  getInvoices,
+  getConsolidatedInvoices,
+  getConsolidatedInvoice,
+  addConsolidatedPayment,
   getReceiptDashboard
 } = require('../controllers/goodsReceiptController');
 
+// All routes protected
 router.use(protect);
 
-// Dashboard
+// ============================================
+// DASHBOARD
+// ============================================
 router.get('/dashboard', getReceiptDashboard);
 
-// Invoice Routes
-router.get('/invoices', getInvoices);
-router.get('/invoice/:invoiceId', getInvoice);
-router.post('/invoice/:invoiceId/payment', restrictTo('admin', 'manager'), addPayment);
+// ============================================
+// CONSOLIDATED INVOICE ROUTES
+// ============================================
+router.get('/invoices', getConsolidatedInvoices);
+router.get('/invoices/:invoiceId', getConsolidatedInvoice);
+router.post('/invoices/:invoiceId/payment', restrictTo('admin', 'manager'), addConsolidatedPayment);
 
-// GRN Routes
-router.route('/')
+// ============================================
+// GRN LIST + CREATE
+// ============================================
+router
+  .route('/')
   .get(getGRNs)
   .post(restrictTo('admin', 'manager'), createGRN);
 
-router.route('/:id')
+// ============================================
+// SINGLE GRN (GET / DELETE)
+// ============================================
+router
+  .route('/:id')
   .get(getGRN)
   .delete(restrictTo('admin'), deleteGRN);
-
-// Invoice generation
-router.post('/:grnId/generate-invoice', restrictTo('admin', 'manager'), generatePurchaseInvoice);
 
 module.exports = router;

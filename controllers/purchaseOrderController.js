@@ -1,7 +1,17 @@
-// controllers/purchaseOrderController.js
+const mongoose = require('mongoose');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 
+// ===== HELPER: Check valid MongoDB ObjectId =====
+const isValidObjectId = (id) => {
+  if (!id) return false;
+  return mongoose.Types.ObjectId.isValid(id) && 
+         String(new mongoose.Types.ObjectId(id)) === String(id);
+};
+
+// ============================================
+// CREATE PURCHASE ORDER
+// ============================================
 exports.createPurchaseOrder = async (req, res) => {
   try {
     const { 
@@ -10,12 +20,16 @@ exports.createPurchaseOrder = async (req, res) => {
       ccEmail, items, notes, date, expectedDate,
       gstType, currency, exchangeRate,
       subtotal, totalTax, igst, cgst, sgst, total,
-      freight, insurance, inventoryCharges, chargesSubtotal, chargesTax
+      freight, insurance, inventoryCharges, chargesSubtotal, chargesTax,
+      purchaserName
     } = req.body;
 
     if (!items || items.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one item required' });
     }
+
+    // ===== SANITIZE IDs =====
+    const safeSupplierId = isValidObjectId(supplierId) ? supplierId : null;
 
     const formattedItems = items.map(item => {
       const qty = parseFloat(item.quantity) || 0;
@@ -26,7 +40,7 @@ exports.createPurchaseOrder = async (req, res) => {
 
       return {
         product: item.product || item.productId || 'N/A',
-        productId: item.productId || null,
+        productId: isValidObjectId(item.productId) ? item.productId : null,
         productName: item.productName || item.name || '',
         name: item.productName || item.name || '',
         batchNumber: item.batchNumber || 'N/A',
@@ -80,6 +94,7 @@ exports.createPurchaseOrder = async (req, res) => {
       calcIgst = igst !== undefined ? parseFloat(igst) : calcTotalTax;
     }
 
+    // Generate unique PO number
     const year = new Date().getFullYear();
     const lastOrder = await PurchaseOrder.findOne({
       poNumber: new RegExp(`^PO-${year}/`)
@@ -103,7 +118,7 @@ exports.createPurchaseOrder = async (req, res) => {
     const purchaseOrder = new PurchaseOrder({
       poNumber,
       supplier: supplier || supplierName || 'N/A',
-      supplierId: supplierId || null,
+      supplierId: safeSupplierId,
       supplierName: supplierName || supplier || '',
       supplierAddress: supplierAddress || 'N/A',
       supplierGST: supplierGST || 'N/A',
@@ -115,7 +130,7 @@ exports.createPurchaseOrder = async (req, res) => {
       date: date || new Date().toISOString().split('T')[0],
       expectedDate: expectedDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       items: formattedItems,
-      purchaserName: req.body.purchaserName || '',
+      purchaserName: purchaserName || req.body.purchaserName || '',
       currency: currency || 'INR',
       exchangeRate: parseFloat(exchangeRate) || 1,
       subtotal: calcSubtotal,

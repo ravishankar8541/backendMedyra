@@ -30,6 +30,76 @@ const ChargesSchema = new mongoose.Schema({
   taxAmount: { type: Number, default: 0 }
 }, { _id: false });
 
+const PaymentSchema = new mongoose.Schema({
+  date: { type: String, required: true },
+  amount: { type: Number, required: true },
+  method: {
+    type: String,
+    enum: ['cash', 'bank', 'cheque', 'online', 'adjustment'],
+    default: 'bank'
+  },
+  reference: { type: String, default: '' },
+  notes: { type: String, default: '' },
+  receivedBy: { type: String, default: '' }
+}, { _id: true });
+
+const ConsolidatedInvoiceSchema = new mongoose.Schema({
+  invoiceNumber: { type: String, required: true, unique: true },
+  grnIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' }],
+  poNumber: { type: String, required: true },
+  purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder' },
+  supplierId: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier' },
+  supplierName: { type: String, required: true },
+  supplierGST: { type: String, default: '' },
+  supplierAddress: { type: String, default: '' },
+  supplierContact: { type: String, default: '' },
+  supplierEmail: { type: String, default: '' },
+  invoiceDate: { type: String, required: true },
+  dueDate: { type: String, required: true },
+  items: [GRNItemSchema],
+  subtotal: { type: Number, default: 0 },
+  totalTax: { type: Number, default: 0 },
+  chargesSubtotal: { type: Number, default: 0 },
+  chargesTax: { type: Number, default: 0 },
+  grandTotal: { type: Number, default: 0 },
+  freight: { type: ChargesSchema, default: () => ({}) },
+  insurance: { type: ChargesSchema, default: () => ({}) },
+  inventoryCharges: { type: ChargesSchema, default: () => ({}) },
+  gstType: { type: String, enum: ['igst', 'cgst_sgst'], default: 'igst' },
+  currency: { type: String, default: 'INR' },
+  exchangeRate: { type: Number, default: 1 },
+  paidAmount: { type: Number, default: 0 },
+  payments: { type: [PaymentSchema], default: [] },
+  remainingAmount: { type: Number, default: 0 },
+  paymentStatus: {
+    type: String,
+    enum: ['pending', 'partial', 'paid'],
+    default: 'pending'
+  },
+  status: {
+    type: String,
+    enum: ['draft', 'generated', 'paid'],
+    default: 'draft'
+  },
+  notes: { type: String, default: '' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  isConsolidated: { type: Boolean, default: true },
+  receiptCount: { type: Number, default: 0 }
+}, { timestamps: true });
+
+// Track charges applied to which receipt
+const ChargeAllocationSchema = new mongoose.Schema({
+  grnId: { type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' },
+  grnNumber: { type: String },
+  chargesApplied: { type: Boolean, default: false },
+  charges: {
+    freight: { type: ChargesSchema, default: () => ({}) },
+    insurance: { type: ChargesSchema, default: () => ({}) },
+    inventoryCharges: { type: ChargesSchema, default: () => ({}) }
+  }
+}, { _id: false });
+
+// Add to GoodsReceiptSchema
 const GoodsReceiptSchema = new mongoose.Schema({
   grnNumber: { type: String, required: true, unique: true },
   purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder', required: true },
@@ -42,14 +112,12 @@ const GoodsReceiptSchema = new mongoose.Schema({
   warehouse: { type: String, default: 'Main Warehouse' },
   items: [GRNItemSchema],
   notes: { type: String, default: '' },
-  status: { 
-    type: String, 
-    enum: ['draft', 'completed', 'cancelled'], 
-    default: 'completed' 
+  status: {
+    type: String,
+    enum: ['draft', 'completed', 'cancelled'],
+    default: 'completed'
   },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  
-  // ===== FINANCIALS =====
   currency: { type: String, default: 'INR' },
   exchangeRate: { type: Number, default: 1 },
   subtotal: { type: Number, default: 0 },
@@ -57,22 +125,31 @@ const GoodsReceiptSchema = new mongoose.Schema({
   chargesSubtotal: { type: Number, default: 0 },
   chargesTax: { type: Number, default: 0 },
   grandTotal: { type: Number, default: 0 },
-  
-  // ===== ADDITIONAL CHARGES =====
   freight: { type: ChargesSchema, default: () => ({}) },
   insurance: { type: ChargesSchema, default: () => ({}) },
   inventoryCharges: { type: ChargesSchema, default: () => ({}) },
-  
   gstType: { type: String, enum: ['igst', 'cgst_sgst'], default: 'igst' },
-  
-  // ===== INVOICE TRACKING =====
+  paidAmount: { type: Number, default: 0 },
+  payments: { type: [PaymentSchema], default: [] },
   invoiceGenerated: { type: Boolean, default: false },
-  invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseInvoice' }
+  invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' },
+  // Track if charges were applied in this GRN
+  chargesApplied: { type: Boolean, default: false },
+  // Reference to consolidated invoice
+  consolidatedInvoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' }
 }, { timestamps: true });
 
-GoodsReceiptSchema.index({ grnNumber: 1 });
+// Consolidated Invoice Indexes
+ConsolidatedInvoiceSchema.index({ invoiceNumber: 1 });
+ConsolidatedInvoiceSchema.index({ poNumber: 1 });
+ConsolidatedInvoiceSchema.index({ supplierId: 1 });
+ConsolidatedInvoiceSchema.index({ invoiceDate: -1 });
+
 GoodsReceiptSchema.index({ poNumber: 1 });
 GoodsReceiptSchema.index({ receivedDate: -1 });
 GoodsReceiptSchema.index({ supplierId: 1 });
 
-module.exports = mongoose.models.GoodsReceipt || mongoose.model('GoodsReceipt', GoodsReceiptSchema);
+module.exports = {
+  GoodsReceipt: mongoose.models.GoodsReceipt || mongoose.model('GoodsReceipt', GoodsReceiptSchema),
+  ConsolidatedInvoice: mongoose.models.ConsolidatedInvoice || mongoose.model('ConsolidatedInvoice', ConsolidatedInvoiceSchema)
+};
