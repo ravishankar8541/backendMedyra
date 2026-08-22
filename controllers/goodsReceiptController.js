@@ -28,12 +28,12 @@ const generateGRNNumber = async () => {
 };
 
 // ============================================
-// GENERATE UNIQUE CONSOLIDATED INVOICE NUMBER
+// GENERATE UNIQUE PURCHASE INVOICE NUMBER (PI)
 // ============================================
 const generateConsolidatedInvoiceNumber = async () => {
   const year = new Date().getFullYear();
   const last = await ConsolidatedInvoice.findOne({
-    invoiceNumber: new RegExp(`^CI-${year}/`)
+    invoiceNumber: new RegExp(`^(PI|CI)-${year}/`)
   }).sort({ createdAt: -1 });
 
   let next = 1;
@@ -42,10 +42,10 @@ const generateConsolidatedInvoiceNumber = async () => {
     if (parts[1]) next = parseInt(parts[1], 10) + 1;
   }
 
-  let invoiceNumber = `CI-${year}/${String(next).padStart(3, '0')}`;
+  let invoiceNumber = `PI-${year}/${String(next).padStart(3, '0')}`;
   while (await ConsolidatedInvoice.exists({ invoiceNumber })) {
     next++;
-    invoiceNumber = `CI-${year}/${String(next).padStart(3, '0')}`;
+    invoiceNumber = `PI-${year}/${String(next).padStart(3, '0')}`;
   }
   return invoiceNumber;
 };
@@ -137,13 +137,13 @@ exports.createGRN = async (req, res) => {
       subtotal += itemSubtotal;
       totalTax += itemTax;
 
-      // Update stock
+      // Update stock & batches
       if (product) {
         if (product.productType === 'batch' || Array.isArray(product.batches)) {
           if (!product.batches) product.batches = [];
 
           const batchNumber = item.batchNumber || `BATCH-${Date.now().toString().slice(-6)}`;
-          const existingBatch = product.batches.find((b) => b.batchNumber === batchNumber);
+          const existingBatch = product.batches.find((b) => b.batchNumber && b.batchNumber.toLowerCase() === batchNumber.trim().toLowerCase());
 
           if (existingBatch) {
             existingBatch.quantity = (existingBatch.quantity || 0) + receivedQty;
@@ -151,7 +151,7 @@ exports.createGRN = async (req, res) => {
             if (item.expDate) existingBatch.expDate = item.expDate;
           } else {
             product.batches.push({
-              batchNumber,
+              batchNumber: batchNumber.trim(),
               mfgDate: item.mfgDate || '',
               expDate: item.expDate || '',
               quantity: receivedQty,
@@ -160,8 +160,17 @@ exports.createGRN = async (req, res) => {
               reason: `Received via GRN ${existingGRN?.grnNumber || po.poNumber}`
             });
           }
+          product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
         } else {
           product.stock = (product.stock || 0) + receivedQty;
+        }
+
+        if (product.stock > (product.minStock || 0)) {
+          product.status = 'active';
+        } else if (product.stock > 0) {
+          product.status = 'low_stock';
+        } else {
+          product.status = 'critical';
         }
 
         await product.save();
@@ -246,7 +255,9 @@ exports.createGRN = async (req, res) => {
 
       const chargesSubtotal = freightData.amount + insuranceData.amount + inventoryData.amount;
       const chargesTax = freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
-      const grandTotal = subtotal + totalTax + chargesSubtotal + chargesTax;
+      const exactTotal = subtotal + totalTax + chargesSubtotal + chargesTax;
+      const grandTotal = Math.round(exactTotal);
+      const roundOff = Number((grandTotal - exactTotal).toFixed(2));
 
       grn = new GoodsReceipt({
         grnNumber,
@@ -271,6 +282,7 @@ exports.createGRN = async (req, res) => {
         totalTax,
         chargesSubtotal,
         chargesTax,
+        roundOff,
         grandTotal,
         freight: freightData,
         insurance: insuranceData,
@@ -289,7 +301,6 @@ exports.createGRN = async (req, res) => {
       // ===== SUBSEQUENT RECEIPT: UPDATE THE SAME EXISTING GRN =====
       grn = existingGRN;
 
-      // Merge items into existing GRN
       const mergedItems = [...(grn.items || [])];
       processedItems.forEach(newItem => {
         const existingIdx = mergedItems.findIndex(
@@ -324,8 +335,10 @@ exports.createGRN = async (req, res) => {
       grn.items = mergedItems;
       grn.subtotal = newSubtotal;
       grn.totalTax = newTotalTax;
-      // Keep existing charges without adding again
-      grn.grandTotal = newSubtotal + newTotalTax + (grn.chargesSubtotal || 0) + (grn.chargesTax || 0);
+      
+      const exactTotal = newSubtotal + newTotalTax + (grn.chargesSubtotal || 0) + (grn.chargesTax || 0);
+      grn.grandTotal = Math.round(exactTotal);
+      grn.roundOff = Number((grn.grandTotal - exactTotal).toFixed(2));
 
       if (paymentEntry) {
         if (!Array.isArray(grn.payments)) grn.payments = [];
@@ -382,7 +395,7 @@ exports.createGRN = async (req, res) => {
 
     await po.save();
 
-    // ===== HANDLE CONSOLIDATED INVOICE =====
+    // ===== HANDLE PURCHASE INVOICE (PI) =====
     let existingInvoice = await ConsolidatedInvoice.findOne({
       purchaseOrder: purchaseOrderId,
       status: { $in: ['draft', 'generated'] }
@@ -408,6 +421,7 @@ exports.createGRN = async (req, res) => {
         totalTax: grn.totalTax,
         chargesSubtotal: grn.chargesSubtotal,
         chargesTax: grn.chargesTax,
+        roundOff: grn.roundOff,
         grandTotal: grn.grandTotal,
         freight: grn.freight,
         insurance: grn.insurance,
@@ -429,6 +443,7 @@ exports.createGRN = async (req, res) => {
       existingInvoice.items = grn.items;
       existingInvoice.subtotal = grn.subtotal;
       existingInvoice.totalTax = grn.totalTax;
+      existingInvoice.roundOff = grn.roundOff;
       existingInvoice.grandTotal = grn.grandTotal;
       existingInvoice.paidAmount = grn.paidAmount || 0;
       existingInvoice.remainingAmount = Math.max(0, grn.grandTotal - (grn.paidAmount || 0));
@@ -461,6 +476,91 @@ exports.createGRN = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ============================================
+// ADD PAYMENT (FIXED: ACCEPTS BOTH GRN ID & INVOICE ID)
+// ============================================
+exports.addPayment = async (req, res) => {
+  try {
+    const id = req.params.id || req.params.grnId || req.params.invoiceId;
+    const { date, paymentDate, amount, method, paymentMethod, reference, transactionId, notes } = req.body;
+
+    const paymentAmount = Number(amount) || 0;
+    if (paymentAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment amount must be greater than 0'
+      });
+    }
+
+    let grn = null;
+    let invoice = null;
+
+    if (mongoose.isValidObjectId(id)) {
+      grn = await GoodsReceipt.findById(id);
+      if (grn) {
+        if (grn.consolidatedInvoiceId) {
+          invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+        }
+        if (!invoice) {
+          invoice = await ConsolidatedInvoice.findOne({ purchaseOrder: grn.purchaseOrder });
+        }
+      } else {
+        invoice = await ConsolidatedInvoice.findById(id);
+        if (invoice) {
+          grn = await GoodsReceipt.findOne({ consolidatedInvoiceId: invoice._id });
+        }
+      }
+    }
+
+    if (!grn && !invoice) {
+      return res.status(404).json({
+        success: false,
+        message: 'Goods Receipt or Invoice record not found'
+      });
+    }
+
+    const paymentEntry = {
+      date: date || paymentDate || new Date().toISOString().split('T')[0],
+      amount: paymentAmount,
+      method: method || paymentMethod || 'bank',
+      reference: reference || transactionId || '',
+      notes: notes || '',
+      receivedBy: req.user?.name || 'System'
+    };
+
+    // Update GRN Record
+    if (grn) {
+      if (!Array.isArray(grn.payments)) grn.payments = [];
+      grn.payments.push(paymentEntry);
+      grn.paidAmount = (Number(grn.paidAmount) || 0) + paymentAmount;
+      await grn.save();
+    }
+
+    // Update Consolidated Invoice Record
+    if (invoice) {
+      if (!Array.isArray(invoice.payments)) invoice.payments = [];
+      invoice.payments.push(paymentEntry);
+      invoice.paidAmount = (Number(invoice.paidAmount) || 0) + paymentAmount;
+      invoice.remainingAmount = Math.max(0, (invoice.grandTotal || 0) - invoice.paidAmount);
+      invoice.paymentStatus = invoice.remainingAmount <= 0 ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
+      invoice.status = invoice.paymentStatus;
+      await invoice.save();
+    }
+
+    return res.json({
+      success: true,
+      data: grn || invoice,
+      message: `✅ Payment of ${paymentAmount} recorded successfully!`
+    });
+  } catch (error) {
+    console.error('❌ Add payment error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Aliased to ensure both /payment and /invoices/:id/payment work
+exports.addConsolidatedPayment = exports.addPayment;
 
 // ============================================
 // GET ALL CONSOLIDATED INVOICES
@@ -569,80 +669,6 @@ exports.getConsolidatedInvoice = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Get consolidated invoice error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// ============================================
-// ADD PAYMENT TO CONSOLIDATED INVOICE
-// ============================================
-exports.addConsolidatedPayment = async (req, res) => {
-  try {
-    const { invoiceId } = req.params;
-    const { date, amount, method, reference, notes } = req.body;
-
-    const invoice = await ConsolidatedInvoice.findById(invoiceId);
-    if (!invoice) {
-      return res.status(404).json({ success: false, message: 'Invoice not found' });
-    }
-
-    if (invoice.paymentStatus === 'paid') {
-      return res.status(400).json({
-        success: false,
-        message: 'Invoice is already fully paid'
-      });
-    }
-
-    const paymentAmount = Number(amount) || 0;
-    if (paymentAmount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment amount must be greater than 0'
-      });
-    }
-
-    if (!Array.isArray(invoice.payments)) {
-      invoice.payments = [];
-    }
-
-    invoice.payments.push({
-      date: date || new Date().toISOString().split('T')[0],
-      amount: paymentAmount,
-      method: method || 'bank',
-      reference: reference || '',
-      notes: notes || '',
-      receivedBy: req.user?.name || 'System'
-    });
-
-    invoice.paidAmount = (Number(invoice.paidAmount) || 0) + paymentAmount;
-    invoice.remainingAmount = Math.max(0, invoice.grandTotal - invoice.paidAmount);
-
-    if (invoice.remainingAmount <= 0) {
-      invoice.paymentStatus = 'paid';
-      invoice.status = 'paid';
-    } else if (invoice.paidAmount > 0) {
-      invoice.paymentStatus = 'partial';
-    }
-
-    await invoice.save();
-
-    await GoodsReceipt.updateMany(
-      { consolidatedInvoiceId: invoice._id },
-      {
-        $set: {
-          paidAmount: invoice.paidAmount,
-          payments: invoice.payments
-        }
-      }
-    );
-
-    res.json({
-      success: true,
-      data: invoice,
-      message: `Payment of ${paymentAmount} recorded successfully`
-    });
-  } catch (error) {
-    console.error('❌ Add payment error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -814,6 +840,7 @@ exports.deleteGRN = async (req, res) => {
               product.batches = product.batches.filter((b) => b.batchNumber !== item.batchNumber);
             }
           }
+          product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
         } else {
           product.stock = Math.max(0, (product.stock || 0) - receivedQty);
         }
@@ -931,7 +958,7 @@ exports.getReceiptDashboard = async (req, res) => {
 };
 
 // ============================================
-// LEGACY FUNCTIONS
+// LEGACY COMPATIBILITY
 // ============================================
 exports.generatePurchaseInvoice = async (req, res) => {
   res.status(400).json({
@@ -940,18 +967,8 @@ exports.generatePurchaseInvoice = async (req, res) => {
   });
 };
 
-exports.addPayment = async (req, res) => {
-  res.status(400).json({
-    success: false,
-    message: 'Use consolidated invoice payment endpoint instead'
-  });
-};
-
 exports.getInvoice = async (req, res) => {
-  res.status(400).json({
-    success: false,
-    message: 'Use consolidated invoice endpoint instead'
-  });
+  return exports.getConsolidatedInvoice(req, res);
 };
 
 exports.getInvoices = async (req, res) => {
