@@ -1,3 +1,4 @@
+// controllers/productController.js
 const Product = require('../models/Product');
 
 // ============================================
@@ -9,7 +10,6 @@ exports.createProduct = async (req, res) => {
     
     console.log('📦 Received product data:', JSON.stringify(req.body, null, 2));
 
-    // Validate required fields
     if (!basicInfo || !basicInfo.name || !basicInfo.category) {
       return res.status(400).json({
         success: false,
@@ -17,7 +17,6 @@ exports.createProduct = async (req, res) => {
       });
     }
 
-    // Generate SKU if not provided
     let sku = basicInfo.sku;
     if (!sku || sku.trim() === '') {
       const prefix = basicInfo.name.substring(0, 3).toUpperCase();
@@ -25,12 +24,10 @@ exports.createProduct = async (req, res) => {
       sku = `${prefix}-${random}`;
     }
 
-    // ✅ FIX: Handle images properly - filter out empty objects
     let imageUrls = [];
     let documentUrls = [];
     
     if (media && media.images && Array.isArray(media.images)) {
-      // Filter out empty objects and keep only strings
       imageUrls = media.images.filter(img => img && typeof img === 'string');
     }
     
@@ -38,7 +35,6 @@ exports.createProduct = async (req, res) => {
       documentUrls = media.documents.filter(doc => doc && typeof doc === 'string');
     }
 
-    // Transform frontend data
     const productData = {
       name: basicInfo.name.trim(),
       sku: sku,
@@ -66,11 +62,11 @@ exports.createProduct = async (req, res) => {
       stock: 0,
       batches: [],
       
-      images: imageUrls, // ✅ Will be empty array if no valid images
+      images: imageUrls,
       documents: documentUrls,
       
       status: 'active',
-      createdBy: req.user.id
+      createdBy: req.user?.id
     };
 
     console.log('📝 Saving product:', JSON.stringify(productData, null, 2));
@@ -103,156 +99,12 @@ exports.createProduct = async (req, res) => {
   }
 };
 
-
-// ============================================
-// UPDATE BATCH - FULL EDIT
-// ============================================
-exports.updateBatch = async (req, res) => {
-  try {
-    const { batchIndex } = req.params;
-    const { batchNumber, mfgDate, expDate, quantity, manufacturer, reason, action } = req.body;
-
-    const product = await Product.findById(req.params.id);
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found'
-      });
-    }
-
-    const index = parseInt(batchIndex);
-    if (isNaN(index) || index >= product.batches.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Batch not found'
-      });
-    }
-
-    const batch = product.batches[index];
-    
-    if (action === 'edit') {
-      // FULL EDIT - Update all fields
-      batch.batchNumber = batchNumber || batch.batchNumber;
-      batch.mfgDate = mfgDate || batch.mfgDate;
-      batch.expDate = expDate || batch.expDate;
-      batch.quantity = parseInt(quantity) || batch.quantity;
-      batch.manufacturer = manufacturer || batch.manufacturer || 'N/A';
-      batch.reason = reason || batch.reason || 'Batch updated';
-      batch.addedDate = new Date().toISOString().split('T')[0];
-      
-      console.log(`✅ Batch ${batch.batchNumber} updated successfully`);
-    } else if (action === 'add') {
-      // ADD stock to existing batch
-      const addQuantity = parseInt(quantity) || 0;
-      if (addQuantity <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'Valid quantity is required'
-        });
-      }
-      
-      batch.quantity += addQuantity;
-      batch.reason = reason || `Stock addition (${addQuantity} units)`;
-      batch.addedDate = new Date().toISOString().split('T')[0];
-      
-      console.log(`✅ Added ${addQuantity} to batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
-    } else {
-      // REMOVE stock from batch
-      const removeQuantity = parseInt(quantity) || 0;
-      if (removeQuantity <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'Valid quantity is required'
-        });
-      }
-      
-      if (batch.quantity < removeQuantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock in batch. Available: ${batch.quantity}`
-        });
-      }
-      
-      batch.quantity -= removeQuantity;
-      batch.reason = reason || `Stock removal (${removeQuantity} units)`;
-      
-      console.log(`✅ Removed ${removeQuantity} from batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
-      
-      // If batch quantity becomes 0, remove the batch
-      if (batch.quantity === 0) {
-        product.batches.splice(index, 1);
-        console.log(`🗑️ Batch ${batch.batchNumber} removed`);
-      }
-    }
-
-    await product.save();
-
-    res.json({
-      success: true,
-      data: product,
-      batch: product.batches[index] || null,
-      message: `Batch updated successfully!`
-    });
-  } catch (error) {
-    console.error('Update batch error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
-
-// ============================================
-// DELETE BATCH
-// ============================================
-exports.deleteBatch = async (req, res) => {
-  try {
-    const { batchIndex } = req.params;
-    const product = await Product.findById(req.params.id);
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found'
-      });
-    }
-
-    const index = parseInt(batchIndex);
-    if (isNaN(index) || index >= product.batches.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Batch not found'
-      });
-    }
-
-    const batch = product.batches[index];
-    const batchNumber = batch.batchNumber || 'N/A';
-    
-    // Remove the batch
-    product.batches.splice(index, 1);
-    await product.save();
-
-    console.log(`🗑️ Batch ${batchNumber} deleted successfully`);
-
-    res.json({
-      success: true,
-      message: `Batch ${batchNumber} deleted successfully!`,
-      data: product
-    });
-  } catch (error) {
-    console.error('Delete batch error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
 // ============================================
 // GET ALL PRODUCTS
 // ============================================
 exports.getProducts = async (req, res) => {
   try {
-    const { page = 1, limit = 10, category, status, search } = req.query;
+    const { page = 1, limit = 100, category, status, search } = req.query;
 
     const query = {};
     if (category && category !== 'all') query.category = category;
@@ -418,12 +270,25 @@ exports.deleteProduct = async (req, res) => {
   }
 };
 
-// ============================================
-// ADD BATCH TO PRODUCT
-// ============================================
 exports.addBatch = async (req, res) => {
   try {
-    const { batchNumber, mfgDate, expDate, quantity, packing, grossWeight, totalKg, dimension, storageCondition, shelfLife, reason } = req.body;
+    const { 
+      batchNumber, 
+      mfgDate, 
+      expDate, 
+      quantity, 
+      packing, 
+      grossWeight, 
+      totalKg, 
+      dimension, 
+      storageCondition, 
+      shelfLife, 
+      reason,
+      mrp, 
+      costPrice, 
+      sellingPrice, 
+      manufacturer 
+    } = req.body;
 
     const product = await Product.findById(req.params.id);
     if (!product) {
@@ -440,17 +305,22 @@ exports.addBatch = async (req, res) => {
       });
     }
 
+    // ✅ Same batchNumber ALLOWED – har stock addition naya row banega
     const newBatch = {
-      batchNumber: batchNumber || `BATCH-${Date.now().toString().slice(-6)}`,
+      batchNumber: (batchNumber || '').trim() || `BATCH-${Date.now().toString().slice(-6)}`,
       mfgDate: mfgDate || '',
       expDate: expDate || '',
       quantity: parseInt(quantity) || 0,
+      mrp: parseFloat(mrp) || product.pricing?.mrp || 0,
+      costPrice: parseFloat(costPrice) || product.pricing?.costPrice || 0,
+      sellingPrice: parseFloat(sellingPrice) || product.pricing?.sellingPrice || 0,
       packing: packing || 'N/A',
       grossWeight: parseFloat(grossWeight) || 0,
       totalKg: parseFloat(totalKg) || 0,
       dimension: dimension || 'N/A',
       storageCondition: storageCondition || 'Room temperature',
       shelfLife: shelfLife || 'N/A',
+      manufacturer: manufacturer || product.manufacturer || 'N/A',
       addedDate: new Date().toISOString().split('T')[0],
       addedBy: req.user?.name || 'System',
       reason: reason || 'Stock addition'
@@ -472,7 +342,183 @@ exports.addBatch = async (req, res) => {
 };
 
 // ============================================
-// REMOVE BATCH STOCK
+// UPDATE BATCH - FULL EDIT / ADD STOCK (with pricing)
+// ============================================
+exports.updateBatch = async (req, res) => {
+  try {
+    const { batchIndex } = req.params;
+    const { 
+      batchNumber, 
+      mfgDate, 
+      expDate, 
+      quantity, 
+      manufacturer, 
+      reason, 
+      action,
+      mrp, 
+      costPrice, 
+      sellingPrice 
+    } = req.body;
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const index = parseInt(batchIndex);
+    if (isNaN(index) || index < 0 || index >= product.batches.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+
+    const batch = product.batches[index];
+    
+    if (action === 'edit') {
+      // FULL EDIT - Update all fields including prices
+      batch.batchNumber = batchNumber || batch.batchNumber;
+      batch.mfgDate = mfgDate || batch.mfgDate;
+      batch.expDate = expDate || batch.expDate;
+      batch.quantity = parseInt(quantity) ?? batch.quantity;
+      batch.manufacturer = manufacturer || batch.manufacturer || 'N/A';
+      batch.reason = reason || batch.reason || 'Batch updated';
+      batch.addedDate = new Date().toISOString().split('T')[0];
+      
+      if (mrp !== undefined && mrp !== null && mrp !== '') {
+        batch.mrp = parseFloat(mrp) || 0;
+      }
+      if (costPrice !== undefined && costPrice !== null && costPrice !== '') {
+        batch.costPrice = parseFloat(costPrice) || 0;
+      }
+      if (sellingPrice !== undefined && sellingPrice !== null && sellingPrice !== '') {
+        batch.sellingPrice = parseFloat(sellingPrice) || 0;
+      }
+      
+      console.log(`✅ Batch ${batch.batchNumber} fully updated`);
+    } 
+    else if (action === 'add') {
+      // ADD stock to existing specific lot (same prices)
+      const addQuantity = parseInt(quantity) || 0;
+      if (addQuantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid quantity is required'
+        });
+      }
+      
+      batch.quantity += addQuantity;
+      batch.reason = reason || `Stock addition (${addQuantity} units)`;
+      batch.addedDate = new Date().toISOString().split('T')[0];
+      
+      // Optional: update prices if provided (usually keep same for top-up)
+      if (mrp !== undefined && mrp !== null && mrp !== '') {
+        batch.mrp = parseFloat(mrp) || batch.mrp;
+      }
+      if (costPrice !== undefined && costPrice !== null && costPrice !== '') {
+        batch.costPrice = parseFloat(costPrice) || batch.costPrice;
+      }
+      if (sellingPrice !== undefined && sellingPrice !== null && sellingPrice !== '') {
+        batch.sellingPrice = parseFloat(sellingPrice) || batch.sellingPrice;
+      }
+      
+      console.log(`✅ Added ${addQuantity} to batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+    } 
+    else {
+      // REMOVE stock from batch
+      const removeQuantity = parseInt(quantity) || 0;
+      if (removeQuantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid quantity is required'
+        });
+      }
+      
+      if (batch.quantity < removeQuantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock in batch. Available: ${batch.quantity}`
+        });
+      }
+      
+      batch.quantity -= removeQuantity;
+      batch.reason = reason || `Stock removal (${removeQuantity} units)`;
+      
+      console.log(`✅ Removed ${removeQuantity} from batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+      
+      if (batch.quantity === 0) {
+        product.batches.splice(index, 1);
+        console.log(`🗑️ Batch ${batch.batchNumber} removed (quantity became 0)`);
+      }
+    }
+
+    await product.save();
+
+    res.json({
+      success: true,
+      data: product,
+      batch: product.batches[index] || null,
+      message: `Batch updated successfully!`
+    });
+  } catch (error) {
+    console.error('Update batch error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// ============================================
+// DELETE BATCH
+// ============================================
+exports.deleteBatch = async (req, res) => {
+  try {
+    const { batchIndex } = req.params;
+    const product = await Product.findById(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const index = parseInt(batchIndex);
+    if (isNaN(index) || index < 0 || index >= product.batches.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+
+    const batch = product.batches[index];
+    const batchNumber = batch.batchNumber || 'N/A';
+    
+    product.batches.splice(index, 1);
+    await product.save();
+
+    console.log(`🗑️ Batch ${batchNumber} deleted successfully`);
+
+    res.json({
+      success: true,
+      message: `Batch ${batchNumber} deleted successfully!`,
+      data: product
+    });
+  } catch (error) {
+    console.error('Delete batch error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// ============================================
+// REMOVE BATCH STOCK (alternative endpoint)
 // ============================================
 exports.removeBatchStock = async (req, res) => {
   try {
@@ -486,7 +532,7 @@ exports.removeBatchStock = async (req, res) => {
       });
     }
 
-    if (batchIndex >= product.batches.length) {
+    if (batchIndex === undefined || batchIndex >= product.batches.length) {
       return res.status(400).json({
         success: false,
         message: 'Batch not found'
@@ -494,14 +540,25 @@ exports.removeBatchStock = async (req, res) => {
     }
 
     const batch = product.batches[batchIndex];
-    if (quantity > batch.quantity) {
+    const removeQty = parseInt(quantity) || 0;
+
+    if (removeQty <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Insufficient stock in batch'
+        message: 'Valid quantity is required'
       });
     }
 
-    batch.quantity -= quantity;
+    if (removeQty > batch.quantity) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient stock in batch. Available: ${batch.quantity}`
+      });
+    }
+
+    batch.quantity -= removeQty;
+    batch.reason = reason || `Stock removal (${removeQty} units)`;
+
     if (batch.quantity === 0) {
       product.batches.splice(batchIndex, 1);
     }
@@ -520,7 +577,7 @@ exports.removeBatchStock = async (req, res) => {
 };
 
 // ============================================
-// UPDATE STOCK
+// UPDATE STOCK (for non-batch products mainly)
 // ============================================
 exports.updateStock = async (req, res) => {
   try {
@@ -534,33 +591,43 @@ exports.updateStock = async (req, res) => {
       });
     }
 
+    const qty = parseInt(quantity) || 0;
+    if (qty <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid quantity is required'
+      });
+    }
+
     if (batchIndex !== undefined && product.batches[batchIndex]) {
       const batch = product.batches[batchIndex];
+      
       if (action === 'add') {
-        batch.quantity += parseInt(quantity);
+        batch.quantity += qty;
       } else {
-        if (batch.quantity < quantity) {
+        if (batch.quantity < qty) {
           return res.status(400).json({
             success: false,
             message: 'Insufficient stock in batch'
           });
         }
-        batch.quantity -= parseInt(quantity);
+        batch.quantity -= qty;
         if (batch.quantity === 0) {
           product.batches.splice(batchIndex, 1);
         }
       }
-    } else {
+    } 
+    else {
       if (action === 'add') {
-        product.stock += parseInt(quantity);
+        product.stock += qty;
       } else {
-        if (product.stock < quantity) {
+        if (product.stock < qty) {
           return res.status(400).json({
             success: false,
             message: 'Insufficient stock'
           });
         }
-        product.stock -= parseInt(quantity);
+        product.stock -= qty;
       }
     }
 
@@ -584,7 +651,7 @@ exports.getLowStockProducts = async (req, res) => {
   try {
     const products = await Product.find({
       status: { $in: ['low_stock', 'critical'] }
-    });
+    }).sort({ stock: 1 });
 
     const stats = {
       total: products.length,

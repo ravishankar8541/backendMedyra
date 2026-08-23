@@ -42,6 +42,7 @@ const purchaseReturnRoutes = require('../routes/purchaseReturnRoutes');
 const unitRoutes = require('../routes/unitRoutes');
 const categoryRoutes = require('../routes/categoryRoutes');
 const goodsReceiptRoutes = require('../routes/goodsReceiptRoutes');
+const subCategoryRoutes = require('../routes/subCategoryRoutes');
 
 
 const app = express();
@@ -193,7 +194,7 @@ mountRoute('/api/units', unitRoutes, 'Unit Routes');
 mountRoute('/api/categories', categoryRoutes, 'Category Routes')
 mountRoute('/api/goods-receipts', goodsReceiptRoutes, 'Goods Receipt Routes');
 mountRoute('/api/purchase-returns', purchaseReturnRoutes, 'Purchase Return Routes');
-
+mountRoute('/api/subcategories', subCategoryRoutes, 'Sub Category Routes');
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,

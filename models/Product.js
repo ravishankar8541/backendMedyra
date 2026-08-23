@@ -18,6 +18,20 @@ const BatchSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  // ========== BATCH-WISE / LOT-WISE PRICING ==========
+  mrp: {
+    type: Number,
+    default: 0,
+  },
+  costPrice: {
+    type: Number,
+    default: 0,
+  },
+  sellingPrice: {
+    type: Number,
+    default: 0,
+  },
+  // ================================================
   packing: {
     type: String,
     default: "N/A",
@@ -39,6 +53,10 @@ const BatchSchema = new mongoose.Schema({
     default: "Room temperature",
   },
   shelfLife: {
+    type: String,
+    default: "N/A",
+  },
+  manufacturer: {
     type: String,
     default: "N/A",
   },
@@ -146,7 +164,7 @@ ProductSchema.index({ name: "text", sku: "text", brand: "text" });
 ProductSchema.index({ category: 1, status: 1 });
 ProductSchema.index({ createdAt: -1 });
 
-// ✅ FIX: Pre-save Hook: Accurately calculate batch stock even when empty
+// Pre-save Hook
 ProductSchema.pre("save", function () {
   if (this.productType === "batch") {
     let totalStock = 0;
@@ -155,12 +173,11 @@ ProductSchema.pre("save", function () {
         totalStock += Number(batch.quantity) || 0;
       });
     }
-    this.stock = totalStock; // Always update total stock
+    this.stock = totalStock;
   } else {
     this.batches = [];
   }
 
-  // Calculate status
   if (this.stock <= 0) {
     this.status = "inactive";
   } else if (this.reorderLevel > 0 && this.stock <= this.reorderLevel) {
