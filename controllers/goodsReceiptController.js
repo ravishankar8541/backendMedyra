@@ -93,6 +93,32 @@ exports.createGRN = async (req, res) => {
       });
     }
 
+    // ⭐ 100% ACCURATE SUPPLIER NAME RESOLUTION ⭐
+    let finalSupplierName = (supplierName && supplierName.trim() !== '' && supplierName !== 'N/A') ? supplierName.trim() : '';
+    
+    if (!finalSupplierName && po) {
+      finalSupplierName = po.supplierName || po.supplier?.companyName || po.supplier?.name || '';
+    }
+
+    const possibleSupId = supplierId || po?.supplierId || po?.supplier?._id || po?.supplier;
+    
+    if (!finalSupplierName && possibleSupId) {
+      try {
+        const supDoc = await mongoose.connection.collection('suppliers').findOne({
+          _id: mongoose.isValidObjectId(possibleSupId) ? new mongoose.Types.ObjectId(possibleSupId) : possibleSupId
+        });
+        if (supDoc) {
+          finalSupplierName = supDoc.companyName || supDoc.name || supDoc.supplierName || '';
+        }
+      } catch (err) {
+        console.log('Supplier DB Lookup Error:', err.message);
+      }
+    }
+
+    if (!finalSupplierName) {
+      finalSupplierName = 'Vendor / Supplier';
+    }
+
     // Check if an existing GRN already exists for this PO
     let existingGRN = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId });
     const isFirstReceipt = !existingGRN;
@@ -107,15 +133,27 @@ exports.createGRN = async (req, res) => {
       if (receivedQty <= 0) continue;
 
       let product = null;
-      if (mongoose.isValidObjectId(item.productId)) {
+      if (item.productId && mongoose.isValidObjectId(item.productId)) {
         product = await Product.findById(item.productId);
-      } else if (item.productId) {
+      } 
+      
+      if (!product && item.productId) {
         product = await Product.findOne({
           $or: [
             { productId: item.productId },
             { sku: item.productId },
             { productCode: item.productId },
-            { code: item.productId }
+            { code: item.productId },
+            { 'basicInfo.sku': item.productId }
+          ]
+        });
+      }
+
+      if (!product && item.sku) {
+        product = await Product.findOne({
+          $or: [
+            { sku: item.sku },
+            { 'basicInfo.sku': item.sku }
           ]
         });
       }
@@ -124,7 +162,8 @@ exports.createGRN = async (req, res) => {
         product = await Product.findOne({
           $or: [
             { name: item.productName },
-            { title: item.productName }
+            { title: item.productName },
+            { 'basicInfo.name': item.productName }
           ]
         });
       }
@@ -137,40 +176,75 @@ exports.createGRN = async (req, res) => {
       subtotal += itemSubtotal;
       totalTax += itemTax;
 
-      // Update stock & batches
+      const userMfgDate = item.mfgDate || '';
+      const userExpDate = item.expDate || '';
+
+      // ===== UPDATE STOCK & BATCHES / MOVEMENTS IN PRODUCT =====
       if (product) {
-        if (product.productType === 'batch' || Array.isArray(product.batches)) {
-          if (!product.batches) product.batches = [];
+        const productType = product.productType || product.basicInfo?.productType || 'batch';
+        const isBatchProduct = productType !== 'non-batch';
 
-          const batchNumber = item.batchNumber || `BATCH-${Date.now().toString().slice(-6)}`;
-          const existingBatch = product.batches.find((b) => b.batchNumber && b.batchNumber.toLowerCase() === batchNumber.trim().toLowerCase());
+        const defaultMrp = product.pricing?.mrp || 0;
+        const defaultCost = rate > 0 ? rate : (product.pricing?.costPrice || 0);
+        const defaultSell = product.pricing?.sellingPrice || (rate > 0 ? rate * 1.2 : 0);
 
-          if (existingBatch) {
-            existingBatch.quantity = (existingBatch.quantity || 0) + receivedQty;
-            if (item.mfgDate) existingBatch.mfgDate = item.mfgDate;
-            if (item.expDate) existingBatch.expDate = item.expDate;
-          } else {
-            product.batches.push({
-              batchNumber: batchNumber.trim(),
-              mfgDate: item.mfgDate || '',
-              expDate: item.expDate || '',
-              quantity: receivedQty,
-              addedDate: new Date().toISOString().split('T')[0],
-              addedBy: req.user?.name || 'System',
-              reason: `Received via GRN ${existingGRN?.grnNumber || po.poNumber}`
-            });
+        if (isBatchProduct) {
+          if (!Array.isArray(product.batches)) {
+            product.batches = [];
           }
+
+          const batchNumber = (item.batchNumber && item.batchNumber !== 'N/A')
+            ? item.batchNumber.trim()
+            : `BATCH-${Date.now().toString().slice(-6)}`;
+
+          // Save batch with clear supplierName
+          product.batches.push({
+            batchNumber: batchNumber,
+            mfgDate: userMfgDate,
+            expDate: userExpDate,
+            quantity: receivedQty,
+            costPrice: defaultCost,
+            sellingPrice: defaultSell,
+            mrp: defaultMrp,
+            supplierName: finalSupplierName,
+            supplier: possibleSupId,
+            manufacturer: product.manufacturer || product.basicInfo?.manufacturer || 'N/A',
+            addedDate: receivedDate || new Date().toISOString().split('T')[0],
+            addedBy: req.user?.name || receivedBy || 'System',
+            reason: `GRN ${existingGRN?.grnNumber || po.poNumber} @ ₹${defaultCost.toFixed(2)}`
+          });
+
           product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+          product.markModified('batches');
         } else {
-          product.stock = (product.stock || 0) + receivedQty;
+          // Non-Batch Product
+          product.stock = (Number(product.stock) || 0) + receivedQty;
+
+          if (!Array.isArray(product.stockMovements)) {
+            product.stockMovements = [];
+          }
+
+          product.stockMovements.push({
+            date: new Date(),
+            type: 'add',
+            quantity: receivedQty,
+            mrp: defaultMrp,
+            costPrice: defaultCost,
+            sellingPrice: defaultSell,
+            supplierName: finalSupplierName,
+            reason: `Received via GRN (${po.poNumber || 'GRN'})`
+          });
+          product.markModified('stockMovements');
         }
 
-        if (product.stock > (product.minStock || 0)) {
-          product.status = 'active';
-        } else if (product.stock > 0) {
+        // Status update
+        const minStock = product.minStock || product.basicInfo?.minStock || 0;
+        if (product.stock <= 0) {
+          product.status = 'inactive';
+        } else if (product.stock <= minStock) {
           product.status = 'low_stock';
         } else {
-          product.status = 'critical';
+          product.status = 'active';
         }
 
         await product.save();
@@ -186,10 +260,10 @@ exports.createGRN = async (req, res) => {
 
       processedItems.push({
         productId: validProductId,
-        productName: item.productName || product?.name || '',
-        sku: item.sku || product?.sku || '',
-        hsn: item.hsn || product?.hsn || '',
-        unit: item.unit || product?.unit || 'Strips',
+        productName: item.productName || product?.name || product?.basicInfo?.name || '',
+        sku: item.sku || product?.sku || product?.basicInfo?.sku || '',
+        hsn: item.hsn || product?.hsn || product?.basicInfo?.hsnCode || '',
+        unit: item.unit || product?.unit || product?.basicInfo?.unit || 'Strips',
         orderedQty,
         alreadyReceived,
         receivedQty,
@@ -197,8 +271,8 @@ exports.createGRN = async (req, res) => {
         rejectedQty: 0,
         remainingQty,
         batchNumber: item.batchNumber || 'N/A',
-        mfgDate: item.mfgDate || '',
-        expDate: item.expDate || '',
+        mfgDate: userMfgDate,
+        expDate: userExpDate,
         unitPrice: rate,
         taxRate,
         subtotal: itemSubtotal,
@@ -234,7 +308,6 @@ exports.createGRN = async (req, res) => {
     let overpaymentCredit = 0;
 
     if (isFirstReceipt) {
-      // ===== 1ST RECEIPT: CREATE NEW GRN =====
       const grnNumber = await generateGRNNumber();
 
       const freightData = {
@@ -263,8 +336,8 @@ exports.createGRN = async (req, res) => {
         grnNumber,
         purchaseOrder: purchaseOrderId,
         poNumber: poNumber || po.poNumber,
-        supplierId: supplierId || po.supplierId,
-        supplierName: supplierName || po.supplierName || '',
+        supplierId: possibleSupId,
+        supplierName: finalSupplierName,
         supplierGST: supplierGST || po.supplierGST || '',
         supplierAddress: supplierAddress || po.supplierAddress || '',
         supplierContact: supplierContact || po.supplierContact || '',
@@ -298,7 +371,6 @@ exports.createGRN = async (req, res) => {
         overpaymentCredit = payAmt - grandTotal;
       }
     } else {
-      // ===== SUBSEQUENT RECEIPT: UPDATE THE SAME EXISTING GRN =====
       grn = existingGRN;
 
       const mergedItems = [...(grn.items || [])];
@@ -408,8 +480,8 @@ exports.createGRN = async (req, res) => {
         grnIds: [grn._id],
         poNumber: poNumber || po.poNumber,
         purchaseOrder: purchaseOrderId,
-        supplierId: supplierId || po.supplierId,
-        supplierName: supplierName || po.supplierName || '',
+        supplierId: possibleSupId,
+        supplierName: finalSupplierName,
         supplierGST: supplierGST || po.supplierGST || '',
         supplierAddress: supplierAddress || po.supplierAddress || '',
         supplierContact: supplierContact || po.supplierContact || '',
@@ -468,8 +540,8 @@ exports.createGRN = async (req, res) => {
       overpaymentCredit: overpaymentCredit > 0 ? overpaymentCredit : 0,
       isFirstReceipt,
       message: isFirstReceipt
-        ? `GRN ${grn.grnNumber} created with charges.`
-        : `Updated GRN ${grn.grnNumber} with newly received items.`
+        ? `GRN ${grn.grnNumber} created and stock updated.`
+        : `Updated GRN ${grn.grnNumber} with newly received items and stock updated.`
     });
   } catch (error) {
     console.error('❌ Create GRN error:', error);
@@ -559,7 +631,6 @@ exports.addPayment = async (req, res) => {
   }
 };
 
-// Aliased to ensure both /payment and /invoices/:id/payment work
 exports.addConsolidatedPayment = exports.addPayment;
 
 // ============================================
@@ -809,7 +880,7 @@ exports.deleteGRN = async (req, res) => {
       if (receivedQty <= 0) continue;
 
       let product = null;
-      if (mongoose.isValidObjectId(item.productId)) {
+      if (item.productId && mongoose.isValidObjectId(item.productId)) {
         product = await Product.findById(item.productId);
       } else if (item.productId) {
         product = await Product.findOne({
@@ -817,7 +888,17 @@ exports.deleteGRN = async (req, res) => {
             { productId: item.productId },
             { sku: item.productId },
             { productCode: item.productId },
-            { code: item.productId }
+            { code: item.productId },
+            { 'basicInfo.sku': item.productId }
+          ]
+        });
+      }
+
+      if (!product && item.sku) {
+        product = await Product.findOne({
+          $or: [
+            { sku: item.sku },
+            { 'basicInfo.sku': item.sku }
           ]
         });
       }
@@ -826,23 +907,28 @@ exports.deleteGRN = async (req, res) => {
         product = await Product.findOne({
           $or: [
             { name: item.productName },
-            { title: item.productName }
+            { title: item.productName },
+            { 'basicInfo.name': item.productName }
           ]
         });
       }
 
       if (product) {
-        if (product.productType === 'batch' && product.batches) {
-          const batch = product.batches.find((b) => b.batchNumber === item.batchNumber);
-          if (batch) {
-            batch.quantity = Math.max(0, (batch.quantity || 0) - receivedQty);
-            if (batch.quantity === 0) {
-              product.batches = product.batches.filter((b) => b.batchNumber !== item.batchNumber);
+        const productType = product.productType || product.basicInfo?.productType || 'batch';
+        const isBatchProduct = productType !== 'non-batch';
+
+        if (isBatchProduct && Array.isArray(product.batches)) {
+          const batchIndex = product.batches.findIndex((b) => b.batchNumber === item.batchNumber);
+          if (batchIndex > -1) {
+            product.batches[batchIndex].quantity = Math.max(0, (product.batches[batchIndex].quantity || 0) - receivedQty);
+            if (product.batches[batchIndex].quantity === 0) {
+              product.batches.splice(batchIndex, 1);
             }
           }
           product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+          product.markModified('batches');
         } else {
-          product.stock = Math.max(0, (product.stock || 0) - receivedQty);
+          product.stock = Math.max(0, (Number(product.stock) || 0) - receivedQty);
         }
 
         await product.save();

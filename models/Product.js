@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 
+// ========== BATCH SCHEMA ==========
 const BatchSchema = new mongoose.Schema({
   batchNumber: { type: String, required: true },
   mfgDate: { type: String, default: "" },
@@ -8,6 +9,8 @@ const BatchSchema = new mongoose.Schema({
   mrp: { type: Number, default: 0 },
   costPrice: { type: Number, default: 0 },
   sellingPrice: { type: Number, default: 0 },
+  supplierName: { type: String, default: "" }, // ⭐ YEH ZAROORI HAI
+  supplier: { type: mongoose.Schema.Types.Mixed, default: null },
   packing: { type: String, default: "N/A" },
   grossWeight: { type: Number, default: 0 },
   totalKg: { type: Number, default: 0 },
@@ -20,13 +23,14 @@ const BatchSchema = new mongoose.Schema({
   reason: { type: String, default: "Stock addition" },
 });
 
-// ========== NEW: Stock Movement History (for Non-Batch) ==========
+// ========== STOCK MOVEMENT HISTORY (for Non-Batch) ==========
 const StockMovementSchema = new mongoose.Schema({
   type: { type: String, enum: ["add", "remove"], required: true },
   quantity: { type: Number, required: true },
   mrp: { type: Number, default: 0 },
   costPrice: { type: Number, default: 0 },
   sellingPrice: { type: Number, default: 0 },
+  supplierName: { type: String, default: "" }, // ⭐ YEH ZAROORI HAI
   reason: { type: String, default: "" },
   addedBy: { type: String, default: "System" },
   date: { type: Date, default: Date.now },
@@ -61,8 +65,6 @@ const ProductSchema = new mongoose.Schema(
     reorderLevel: { type: Number, default: 0 },
 
     batches: { type: [BatchSchema], default: [] },
-
-    // ========== NEW FIELD ==========
     stockMovements: { type: [StockMovementSchema], default: [] },
 
     images: { type: [String], default: [] },
@@ -94,7 +96,6 @@ ProductSchema.pre("save", function () {
     }
     this.stock = totalStock;
   } else {
-    // Non-batch → batches हमेशा खाली
     this.batches = [];
   }
 
