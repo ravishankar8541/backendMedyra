@@ -1,4 +1,3 @@
-// controllers/productController.js
 const Product = require('../models/Product');
 
 // ============================================
@@ -270,6 +269,9 @@ exports.deleteProduct = async (req, res) => {
   }
 };
 
+// ============================================
+// ADD BATCH (Only for Batch Products)
+// ============================================
 exports.addBatch = async (req, res) => {
   try {
     const { 
@@ -298,6 +300,14 @@ exports.addBatch = async (req, res) => {
       });
     }
 
+    // ✅ SAFETY: Non-batch product पर batch create रोकें
+    if (product.productType === 'non-batch') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot add batch to Non-Batch product. Please use Stock Update instead.'
+      });
+    }
+
     if (!quantity || quantity <= 0) {
       return res.status(400).json({
         success: false,
@@ -305,7 +315,7 @@ exports.addBatch = async (req, res) => {
       });
     }
 
-    // ✅ Same batchNumber ALLOWED – har stock addition naya row banega
+    // Same batchNumber ALLOWED – har stock addition naya row banega
     const newBatch = {
       batchNumber: (batchNumber || '').trim() || `BATCH-${Date.now().toString().slice(-6)}`,
       mfgDate: mfgDate || '',
@@ -368,6 +378,14 @@ exports.updateBatch = async (req, res) => {
       });
     }
 
+    // Safety check
+    if (product.productType === 'non-batch') {
+      return res.status(400).json({
+        success: false,
+        message: 'This product is Non-Batch. Use stock update instead.'
+      });
+    }
+
     const index = parseInt(batchIndex);
     if (isNaN(index) || index < 0 || index >= product.batches.length) {
       return res.status(400).json({
@@ -401,7 +419,7 @@ exports.updateBatch = async (req, res) => {
       console.log(`✅ Batch ${batch.batchNumber} fully updated`);
     } 
     else if (action === 'add') {
-      // ADD stock to existing specific lot (same prices)
+      // ADD stock to existing specific lot
       const addQuantity = parseInt(quantity) || 0;
       if (addQuantity <= 0) {
         return res.status(400).json({
@@ -414,7 +432,6 @@ exports.updateBatch = async (req, res) => {
       batch.reason = reason || `Stock addition (${addQuantity} units)`;
       batch.addedDate = new Date().toISOString().split('T')[0];
       
-      // Optional: update prices if provided (usually keep same for top-up)
       if (mrp !== undefined && mrp !== null && mrp !== '') {
         batch.mrp = parseFloat(mrp) || batch.mrp;
       }
@@ -577,11 +594,11 @@ exports.removeBatchStock = async (req, res) => {
 };
 
 // ============================================
-// UPDATE STOCK (for non-batch products mainly)
+// UPDATE STOCK (Improved - with History for Non-Batch)
 // ============================================
 exports.updateStock = async (req, res) => {
   try {
-    const { quantity, action, reason, batchIndex } = req.body;
+    const { quantity, action, reason, pricing } = req.body;
     const product = await Product.findById(req.params.id);
 
     if (!product) {
@@ -599,44 +616,63 @@ exports.updateStock = async (req, res) => {
       });
     }
 
-    if (batchIndex !== undefined && product.batches[batchIndex]) {
-      const batch = product.batches[batchIndex];
-      
-      if (action === 'add') {
-        batch.quantity += qty;
-      } else {
-        if (batch.quantity < qty) {
-          return res.status(400).json({
-            success: false,
-            message: 'Insufficient stock in batch'
-          });
-        }
-        batch.quantity -= qty;
-        if (batch.quantity === 0) {
-          product.batches.splice(batchIndex, 1);
-        }
+    // ===== STOCK UPDATE =====
+    if (action === 'add') {
+      product.stock += qty;
+    } else if (action === 'remove') {
+      if (product.stock < qty) {
+        return res.status(400).json({
+          success: false,
+          message: 'Insufficient stock'
+        });
       }
-    } 
-    else {
-      if (action === 'add') {
-        product.stock += qty;
-      } else {
-        if (product.stock < qty) {
-          return res.status(400).json({
-            success: false,
-            message: 'Insufficient stock'
-          });
-        }
-        product.stock -= qty;
+      product.stock -= qty;
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid action. Use "add" or "remove"'
+      });
+    }
+
+    // ===== OPTIONAL: Update Pricing =====
+    let finalMrp = product.pricing?.mrp || 0;
+    let finalCost = product.pricing?.costPrice || 0;
+    let finalSell = product.pricing?.sellingPrice || 0;
+
+    if (pricing && typeof pricing === 'object') {
+      if (pricing.mrp !== undefined && pricing.mrp !== null && pricing.mrp !== '') {
+        finalMrp = parseFloat(pricing.mrp) || 0;
+        product.pricing.mrp = finalMrp;
+      }
+      if (pricing.costPrice !== undefined && pricing.costPrice !== null && pricing.costPrice !== '') {
+        finalCost = parseFloat(pricing.costPrice) || 0;
+        product.pricing.costPrice = finalCost;
+      }
+      if (pricing.sellingPrice !== undefined && pricing.sellingPrice !== null && pricing.sellingPrice !== '') {
+        finalSell = parseFloat(pricing.sellingPrice) || 0;
+        product.pricing.sellingPrice = finalSell;
       }
     }
+
+    // ===== NEW: Save Stock Movement History (especially useful for Non-Batch) =====
+    product.stockMovements = product.stockMovements || [];
+    product.stockMovements.push({
+      type: action, // 'add' or 'remove'
+      quantity: qty,
+      mrp: finalMrp,
+      costPrice: finalCost,
+      sellingPrice: finalSell,
+      reason: reason || (action === 'add' ? 'Stock addition' : 'Stock removal'),
+      addedBy: req.user?.name || 'System',
+      date: new Date()
+    });
 
     await product.save();
 
     res.json({
       success: true,
       data: product,
-      message: 'Stock updated successfully!'
+      message: `Stock ${action === 'add' ? 'added' : 'removed'} successfully!`
     });
   } catch (error) {
     console.error('Update stock error:', error);

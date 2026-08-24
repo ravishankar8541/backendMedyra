@@ -1,115 +1,47 @@
-// models/Product.js
 const mongoose = require("mongoose");
 
 const BatchSchema = new mongoose.Schema({
-  batchNumber: {
-    type: String,
-    required: true,
-  },
-  mfgDate: {
-    type: String,
-    default: "",
-  },
-  expDate: {
-    type: String,
-    default: "",
-  },
-  quantity: {
-    type: Number,
-    default: 0,
-  },
-  // ========== BATCH-WISE / LOT-WISE PRICING ==========
-  mrp: {
-    type: Number,
-    default: 0,
-  },
-  costPrice: {
-    type: Number,
-    default: 0,
-  },
-  sellingPrice: {
-    type: Number,
-    default: 0,
-  },
-  // ================================================
-  packing: {
-    type: String,
-    default: "N/A",
-  },
-  grossWeight: {
-    type: Number,
-    default: 0,
-  },
-  totalKg: {
-    type: Number,
-    default: 0,
-  },
-  dimension: {
-    type: String,
-    default: "N/A",
-  },
-  storageCondition: {
-    type: String,
-    default: "Room temperature",
-  },
-  shelfLife: {
-    type: String,
-    default: "N/A",
-  },
-  manufacturer: {
-    type: String,
-    default: "N/A",
-  },
-  addedDate: {
-    type: String,
-    default: "",
-  },
-  addedBy: {
-    type: String,
-    default: "System",
-  },
-  reason: {
-    type: String,
-    default: "Stock addition",
-  },
+  batchNumber: { type: String, required: true },
+  mfgDate: { type: String, default: "" },
+  expDate: { type: String, default: "" },
+  quantity: { type: Number, default: 0 },
+  mrp: { type: Number, default: 0 },
+  costPrice: { type: Number, default: 0 },
+  sellingPrice: { type: Number, default: 0 },
+  packing: { type: String, default: "N/A" },
+  grossWeight: { type: Number, default: 0 },
+  totalKg: { type: Number, default: 0 },
+  dimension: { type: String, default: "N/A" },
+  storageCondition: { type: String, default: "Room temperature" },
+  shelfLife: { type: String, default: "N/A" },
+  manufacturer: { type: String, default: "N/A" },
+  addedDate: { type: String, default: "" },
+  addedBy: { type: String, default: "System" },
+  reason: { type: String, default: "Stock addition" },
+});
+
+// ========== NEW: Stock Movement History (for Non-Batch) ==========
+const StockMovementSchema = new mongoose.Schema({
+  type: { type: String, enum: ["add", "remove"], required: true },
+  quantity: { type: Number, required: true },
+  mrp: { type: Number, default: 0 },
+  costPrice: { type: Number, default: 0 },
+  sellingPrice: { type: Number, default: 0 },
+  reason: { type: String, default: "" },
+  addedBy: { type: String, default: "System" },
+  date: { type: Date, default: Date.now },
 });
 
 const ProductSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    sku: {
-      type: String,
-      unique: true,
-      sparse: true,
-    },
-    category: {
-      type: String,
-      required: true,
-    },
-    subCategory: {
-      type: String,
-      default: "",
-    },
-    brand: {
-      type: String,
-      default: "",
-    },
-    manufacturer: {
-      type: String,
-      default: "",
-    },
-    hsnCode: {
-      type: String,
-      default: "",
-    },
-    unit: {
-      type: String,
-      default: "Pcs",
-    },
+    name: { type: String, required: true, trim: true },
+    sku: { type: String, unique: true, sparse: true },
+    category: { type: String, required: true },
+    subCategory: { type: String, default: "" },
+    brand: { type: String, default: "" },
+    manufacturer: { type: String, default: "" },
+    hsnCode: { type: String, default: "" },
+    unit: { type: String, default: "Pcs" },
     productType: {
       type: String,
       enum: ["batch", "non-batch"],
@@ -123,18 +55,16 @@ const ProductSchema = new mongoose.Schema(
       discount: { type: Number, default: 0 },
       currency: { type: String, default: "INR" },
     },
-    stock: {
-      type: Number,
-      default: 0,
-    },
+    stock: { type: Number, default: 0 },
     minStock: { type: Number, default: 0 },
     maxStock: { type: Number, default: 0 },
     reorderLevel: { type: Number, default: 0 },
 
-    batches: {
-      type: [BatchSchema],
-      default: [],
-    },
+    batches: { type: [BatchSchema], default: [] },
+
+    // ========== NEW FIELD ==========
+    stockMovements: { type: [StockMovementSchema], default: [] },
+
     images: { type: [String], default: [] },
     documents: { type: [String], default: [] },
     status: {
@@ -142,29 +72,18 @@ const ProductSchema = new mongoose.Schema(
       enum: ["active", "low_stock", "critical", "inactive", "pending"],
       default: "pending",
     },
-    supplier: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Supplier",
-    },
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-    lastUpdated: {
-      type: Date,
-      default: Date.now,
-    },
+    supplier: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier" },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    lastUpdated: { type: Date, default: Date.now },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 ProductSchema.index({ name: "text", sku: "text", brand: "text" });
 ProductSchema.index({ category: 1, status: 1 });
 ProductSchema.index({ createdAt: -1 });
 
-// Pre-save Hook
+// ====================== PRE-SAVE HOOK ======================
 ProductSchema.pre("save", function () {
   if (this.productType === "batch") {
     let totalStock = 0;
@@ -175,9 +94,11 @@ ProductSchema.pre("save", function () {
     }
     this.stock = totalStock;
   } else {
+    // Non-batch → batches हमेशा खाली
     this.batches = [];
   }
 
+  // Status calculation
   if (this.stock <= 0) {
     this.status = "inactive";
   } else if (this.reorderLevel > 0 && this.stock <= this.reorderLevel) {
