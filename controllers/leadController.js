@@ -1,157 +1,74 @@
+// controllers/leadController.js
+const mongoose = require('mongoose');
 const Product = require('../models/Product');
 const Lead = require('../models/Lead');
 const Revenue = require('../models/Revenue');
 const User = require('../models/User');
 const Invoice = require('../models/Invoice');
 
-const reserveStockForItems = async (items = []) => {
+const isValidObjectId = (id) => id && mongoose.Types.ObjectId.isValid(id);
+
+// ============================================
+// ✅ DEDUCT STOCK ONLY ON INVOICE CONVERSION
+// ============================================
+const deductStockForItems = async (items = []) => {
   for (const item of items) {
-    if (!item.productId || !item.quantity) continue;
+    if (!item.productId || !isValidObjectId(item.productId) || !item.quantity) continue;
 
-    const product = await Product.findById(item.productId);
-    if (!product) continue;
+    try {
+      const product = await Product.findById(item.productId);
+      if (!product) continue;
 
-    let qty = parseInt(item.quantity) || 0;
-    if (qty <= 0) continue;
+      let qty = parseInt(item.quantity) || 0;
+      if (qty <= 0) continue;
 
-    if (product.productType === 'batch') {
-      let remaining = qty;
-      let usedBatchNumber = item.batch || null;
+      if (product.productType === 'batch') {
+        let remaining = qty;
 
-      // Same batch number ke saare entries lo
-      let candidateBatches = [];
-      if (item.batch) {
-        candidateBatches = (product.batches || []).filter(
-          (b) => b.batchNumber === item.batch
-        );
-      }
-
-      // FEFO fallback agar batch select nahi hai
-      if (candidateBatches.length === 0) {
-        candidateBatches = [...(product.batches || [])]
-          .filter((b) => (b.quantity || 0) - (b.reservedQuantity || 0) > 0)
-          .sort(
-            (a, b) =>
-              new Date(a.expDate || '9999-12-31') -
-              new Date(b.expDate || '9999-12-31')
+        // 1. Pehle selected batch se stock deduct karo
+        if (item.batch && item.batch !== 'NEW_BATCH') {
+          const matchingBatches = (product.batches || []).filter(
+            (b) => b.batchNumber === item.batch
           );
+          for (const batch of matchingBatches) {
+            if (remaining <= 0) break;
+            const currentQty = batch.quantity || 0;
+            const take = Math.min(currentQty, remaining);
+            batch.quantity = Math.max(0, currentQty - take);
+            remaining -= take;
+          }
+        }
+
+        // 2. Agar bacha ho toh baaki batches se lo (FEFO)
+        if (remaining > 0) {
+          const sortedBatches = (product.batches || [])
+            .filter((b) => (b.quantity || 0) > 0)
+            .sort((a, b) => new Date(a.expDate || '9999-12-31') - new Date(b.expDate || '9999-12-31'));
+
+          for (const batch of sortedBatches) {
+            if (remaining <= 0) break;
+            const currentQty = batch.quantity || 0;
+            const take = Math.min(currentQty, remaining);
+            batch.quantity = Math.max(0, currentQty - take);
+            remaining -= take;
+          }
+        }
+
+        product.stock = (product.batches || []).reduce((sum, b) => sum + (b.quantity || 0), 0);
       } else {
-        candidateBatches.sort(
-          (a, b) =>
-            new Date(a.expDate || '9999-12-31') -
-            new Date(b.expDate || '9999-12-31')
-        );
+        // Non-batch product
+        product.stock = Math.max(0, (product.stock || 0) - qty);
       }
 
-      for (const batch of candidateBatches) {
-        if (remaining <= 0) break;
-
-        const available = (batch.quantity || 0) - (batch.reservedQuantity || 0);
-        if (available <= 0) continue;
-
-        const take = Math.min(available, remaining);
-        batch.reservedQuantity = (batch.reservedQuantity || 0) + take;
-        remaining -= take;
-        usedBatchNumber = batch.batchNumber;
-      }
-
-      if (remaining > 0) {
-        throw new Error(
-          `Insufficient available stock for "${product.name}"${
-            item.batch ? ` (Batch ${item.batch})` : ''
-          }. Available: ${qty - remaining}, Required: ${qty}`
-        );
-      }
-
-      item.batch = usedBatchNumber;
-    } else {
-      const available = (product.stock || 0) - (product.reservedStock || 0);
-      if (available < qty) {
-        throw new Error(
-          `Insufficient available stock for "${product.name}". Available: ${available}, Required: ${qty}`
-        );
-      }
-      product.reservedStock = (product.reservedStock || 0) + qty;
+      await product.save();
+    } catch (err) {
+      console.error(`Stock deduction error for product ${item.productId}:`, err);
     }
-
-    await product.save();
   }
 };
 
-const releaseStockForItems = async (items = []) => {
-  for (const item of items) {
-    if (!item.productId || !item.quantity) continue;
-
-    const product = await Product.findById(item.productId);
-    if (!product) continue;
-
-    let remaining = parseInt(item.quantity) || 0;
-    if (remaining <= 0) continue;
-
-    if (product.productType === 'batch' && item.batch) {
-      const matching = (product.batches || []).filter(
-        (b) => b.batchNumber === item.batch
-      );
-
-      for (const batch of matching) {
-        if (remaining <= 0) break;
-        const reserved = batch.reservedQuantity || 0;
-        if (reserved <= 0) continue;
-
-        const releaseQty = Math.min(reserved, remaining);
-        batch.reservedQuantity = reserved - releaseQty;
-        remaining -= releaseQty;
-      }
-    } else {
-      product.reservedStock = Math.max(
-        0,
-        (product.reservedStock || 0) - remaining
-      );
-    }
-
-    await product.save();
-  }
-};
-
-const deductStockFromReservation = async (items = []) => {
-  for (const item of items) {
-    if (!item.productId || !item.quantity) continue;
-
-    const product = await Product.findById(item.productId);
-    if (!product) continue;
-
-    let remaining = parseInt(item.quantity) || 0;
-    if (remaining <= 0) continue;
-
-    if (product.productType === 'batch' && item.batch) {
-      const matching = (product.batches || []).filter(
-        (b) => b.batchNumber === item.batch
-      );
-
-      for (const batch of matching) {
-        if (remaining <= 0) break;
-
-        const reserved = batch.reservedQuantity || 0;
-        const takeFromReserved = Math.min(reserved, remaining);
-        batch.reservedQuantity = reserved - takeFromReserved;
-
-        const takeFromQty = Math.min(batch.quantity || 0, remaining);
-        batch.quantity = Math.max(0, (batch.quantity || 0) - takeFromQty);
-
-        remaining -= takeFromQty;
-      }
-    } else {
-      product.reservedStock = Math.max(
-        0,
-        (product.reservedStock || 0) - remaining
-      );
-      product.stock = Math.max(0, (product.stock || 0) - remaining);
-    }
-
-    await product.save();
-  }
-};
-
+// ============================================
+// INCENTIVE CALCULATION HELPER
 // ============================================
 const calculateIncentive = (revenue, profitPercentage) => {
   if (profitPercentage >= 35) {
@@ -169,7 +86,6 @@ const calculateIncentive = (revenue, profitPercentage) => {
   }
 };
 
-// ✅ Calculate item totals with incentive
 const calculateItemTotals = (item) => {
   const qty = item.quantity || 1;
   const sellingPrice = item.sellingPrice || item.rate || 0;
@@ -209,7 +125,7 @@ exports.createLead = async (req, res) => {
 
     if (leadData.items && leadData.items.length > 0) {
       for (let item of leadData.items) {
-        if (item.productId) {
+        if (item.productId && isValidObjectId(item.productId)) {
           const product = await Product.findById(item.productId);
           if (product) {
             item.productName = product.name;
@@ -218,6 +134,8 @@ exports.createLead = async (req, res) => {
               item.costPrice = product.pricing?.costPrice || 0;
             }
           }
+        } else {
+          item.productId = null;
         }
         const calculatedItem = calculateItemTotals(item);
         Object.assign(item, calculatedItem);
@@ -289,7 +207,6 @@ exports.updateLead = async (req, res) => {
       lead.type = 'domestic';
     }
 
-    // Update specific proforma
     if (updateData.proforma) {
       const incoming = updateData.proforma;
       const targetNumber = updateData.proformaNumber || incoming.number;
@@ -341,15 +258,9 @@ exports.updateLead = async (req, res) => {
         totalProfit += item.profitAmount || 0;
         totalIncentive += item.incentive || 0;
       }
-      if (!lead.totalIncentive || lead.totalIncentive === 0) {
-        lead.totalIncentive = totalIncentive;
-      }
-      if (!lead.totalProfit || lead.totalProfit === 0) {
-        lead.totalProfit = totalProfit;
-      }
-      if (!lead.totalValue || lead.totalValue === 0) {
-        lead.totalValue = totalValue;
-      }
+      lead.totalIncentive = totalIncentive;
+      lead.totalProfit = totalProfit;
+      lead.totalValue = totalValue;
       lead.value = totalValue;
       lead.profit = totalProfit;
       lead.incentive = totalIncentive;
@@ -375,7 +286,7 @@ exports.updateLead = async (req, res) => {
 };
 
 // ============================================
-// ✅ GENERATE PROFORMA (with Stock Reservation + Versioning)
+// ✅ GENERATE PROFORMA (CRASH-FREE & ACCURATE BATCH)
 // ============================================
 exports.generateProforma = async (req, res) => {
   try {
@@ -406,6 +317,7 @@ exports.generateProforma = async (req, res) => {
       channel = 'Domestic',
       salesPerson = '',
       exchangeRate = '1',
+      currency = '',
       portOfLoading = '',
       portOfDischarge = '',
       destinationCountry = '',
@@ -453,9 +365,11 @@ exports.generateProforma = async (req, res) => {
       let costPrice = item.costPrice || 0;
       let description = item.description || '';
 
-      if (item.productId) {
+      const validProdId = (item.productId && isValidObjectId(item.productId)) ? item.productId : null;
+
+      if (validProdId) {
         try {
-          const product = await Product.findById(item.productId);
+          const product = await Product.findById(validProdId);
           if (product) {
             productName = product.name || productName;
             hsCode = product.hsnCode || hsCode;
@@ -464,20 +378,26 @@ exports.generateProforma = async (req, res) => {
             costPrice = product.pricing?.costPrice || costPrice;
             description = product.description || description;
 
-            if (product.batches && product.batches.length > 0) {
+            if (batchNumber && batchNumber !== 'NEW_BATCH') {
+              const matchedBatch = (product.batches || []).find(b => b.batchNumber === batchNumber);
+              if (matchedBatch) {
+                mfgDate = matchedBatch.mfgDate || mfgDate;
+                expiryDate = matchedBatch.expDate || expiryDate;
+              }
+            } else if (!batchNumber && product.batches && product.batches.length > 0) {
               const firstBatch = product.batches[0];
-              batchNumber = firstBatch.batchNumber || batchNumber;
+              batchNumber = firstBatch.batchNumber || '';
               mfgDate = firstBatch.mfgDate || mfgDate;
               expiryDate = firstBatch.expDate || expiryDate;
             }
           }
         } catch (err) {
-          console.warn('⚠️ Product not found:', item.productId);
+          console.warn('Product lookup info:', validProdId);
         }
       }
 
       proformaItems.push({
-        productId: item.productId || null,
+        productId: validProdId,
         productName,
         description,
         quantity,
@@ -496,16 +416,6 @@ exports.generateProforma = async (req, res) => {
         profitAmount: 0,
         profitPercentage: 0,
         incentive: 0
-      });
-    }
-
-    // ===== RESERVE STOCK (before creating proforma) =====
-    try {
-      await reserveStockForItems(proformaItems);
-    } catch (stockErr) {
-      return res.status(400).json({
-        success: false,
-        message: stockErr.message || 'Stock reservation failed'
       });
     }
 
@@ -533,61 +443,39 @@ exports.generateProforma = async (req, res) => {
     const grandTotal = Math.round(rawTotal);
     const rounding = Number((grandTotal - rawTotal).toFixed(2));
 
-    // ===== Generate Proforma Number =====
+    // ===== Safe Proforma Number Generation =====
     const year = new Date().getFullYear();
     const prefix = proformaType === 'domestic' ? 'PF' : 'PFI';
+    const regex = new RegExp(`^${prefix}-${year}/(\\d+)`);
 
-    const result = await Lead.aggregate([
-      { $unwind: { path: '$proformas', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          num: {
-            $cond: [
-              { $regexMatch: { input: { $ifNull: ['$proformas.number', ''] }, regex: `^${prefix}-${year}/\\d+$` } },
-              {
-                $toInt: {
-                  $arrayElemAt: [
-                    { $split: ['$proformas.number', '/'] },
-                    1
-                  ]
-                }
-              },
-              0
-            ]
+    let maxNum = 0;
+    const allExistingLeads = await Lead.find({
+      $or: [
+        { 'proformas.number': { $regex: `^${prefix}-${year}/` } },
+        { 'proforma.number': { $regex: `^${prefix}-${year}/` } }
+      ]
+    }).select('proformas.number proforma.number').lean();
+
+    allExistingLeads.forEach(l => {
+      (l.proformas || []).forEach(p => {
+        if (p && p.number) {
+          const match = p.number.match(regex);
+          if (match && match[1]) {
+            const val = parseInt(match[1], 10);
+            if (!isNaN(val) && val > maxNum) maxNum = val;
           }
         }
-      },
-      { $group: { _id: null, maxNum: { $max: '$num' } } }
-    ]);
-
-    let maxNumber = result[0]?.maxNum || 0;
-
-    const singleProformaResult = await Lead.aggregate([
-      {
-        $match: {
-          'proforma.number': { $regex: `^${prefix}-${year}/` }
+      });
+      if (l.proforma && l.proforma.number) {
+        const match = l.proforma.number.match(regex);
+        if (match && match[1]) {
+          const val = parseInt(match[1], 10);
+          if (!isNaN(val) && val > maxNum) maxNum = val;
         }
-      },
-      {
-        $project: {
-          num: {
-            $toInt: {
-              $arrayElemAt: [
-                { $split: ['$proforma.number', '/'] },
-                1
-              ]
-            }
-          }
-        }
-      },
-      { $group: { _id: null, maxNum: { $max: '$num' } } }
-    ]);
+      }
+    });
 
-    if (singleProformaResult[0]?.maxNum > maxNumber) {
-      maxNumber = singleProformaResult[0].maxNum;
-    }
-
-    const nextNumber = maxNumber + 1;
+    const nextNumber = maxNum + 1;
     const proformaNumber = `${prefix}-${year}/${String(nextNumber).padStart(4, '0')}`;
 
     const existingTotalIncentive = lead.totalIncentive || 0;
@@ -597,7 +485,9 @@ exports.generateProforma = async (req, res) => {
     const existingProfit = lead.profit || 0;
     const existingValue = lead.value || 0;
 
-    // ===== CREATE PROFORMA OBJECT (with versioning fields) =====
+    const finalCurrency = currency || lead.currency || (proformaType === 'international' ? 'USD' : 'INR');
+
+    // ===== CREATE PROFORMA OBJECT =====
     const newProforma = {
       number: proformaNumber,
       revision: 0,
@@ -613,6 +503,8 @@ exports.generateProforma = async (req, res) => {
       tax: totalTax,
       total: grandTotal,
       rounding,
+      currency: finalCurrency,
+      exchangeRate: String(exchangeRate || '1'),
 
       freight: parsedFreight,
       freightTaxRate: parsedFreightTaxRate,
@@ -626,16 +518,15 @@ exports.generateProforma = async (req, res) => {
 
       channel: channel || 'Domestic',
       salesPerson: salesPerson || '',
-      exchangeRate: String(exchangeRate || '1'),
       deliveryTime,
-      validUntil: validUntil ? new Date(validUntil) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      validUntil: (validUntil && !isNaN(new Date(validUntil).getTime())) ? new Date(validUntil) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       paymentTerms,
       deliveryTerms,
       placeOfSupply,
       notes,
       terms,
       document: `Proforma ${proformaNumber}`,
-      totalInWords: totalInWords || `${proformaType === 'domestic' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(grandTotal)} Only`,
+      totalInWords: totalInWords || `${finalCurrency === 'INR' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(grandTotal)} Only`,
       portOfLoading,
       portOfDischarge,
       destinationCountry,
@@ -651,12 +542,13 @@ exports.generateProforma = async (req, res) => {
       incentive: 0,
       profit: 0,
       conversionDate: null,
-      createdBy: req.user.id,
+      createdBy: req.user?.id || req.user?._id || null,
       revisionNote: 'Original Proforma'
     };
 
     if (!lead.proformas) lead.proformas = [];
-    lead.proformas.push(newProforma);
+   lead.proformas.unshift(newProforma);
+    
     lead.proforma = newProforma;
 
     lead.status = 'proforma_sent';
@@ -676,7 +568,10 @@ exports.generateProforma = async (req, res) => {
     lead.profit = existingProfit;
     lead.value = existingValue;
 
+    lead.markModified('proformas');
+    lead.markModified('proforma');
     await lead.save();
+
     await lead.populate('assignedTo', 'name email');
 
     const proformaData = {
@@ -704,7 +599,7 @@ exports.generateProforma = async (req, res) => {
     });
   } catch (error) {
     console.error('Generate proforma error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message || 'Server error while generating proforma' });
   }
 };
 
@@ -734,6 +629,7 @@ exports.createProformaRevision = async (req, res) => {
       channel,
       salesPerson,
       exchangeRate,
+      currency = '',
       deliveryTime,
       placeOfSupply,
       notes,
@@ -757,7 +653,6 @@ exports.createProformaRevision = async (req, res) => {
       return res.status(400).json({ success: false, message: 'proformaNumber is required' });
     }
 
-    // Find current latest version of this proforma number
     let current = null;
     let currentIndex = -1;
 
@@ -788,21 +683,8 @@ exports.createProformaRevision = async (req, res) => {
       });
     }
 
-    // Release old reservation
-    await releaseStockForItems(current.items || []);
-
     const newItems = items.length > 0 ? items : (current.items || []);
 
-    // Reserve new quantities
-    try {
-      await reserveStockForItems(newItems);
-    } catch (stockErr) {
-      // Rollback – re-reserve old items
-      await reserveStockForItems(current.items || []);
-      return res.status(400).json({ success: false, message: stockErr.message });
-    }
-
-    // Mark old version as not latest
     if (currentIndex >= 0) {
       lead.proformas[currentIndex].isLatest = false;
     }
@@ -810,7 +692,6 @@ exports.createProformaRevision = async (req, res) => {
       lead.proforma.isLatest = false;
     }
 
-    // Calculate totals
     let subtotal = 0;
     const proformaItems = [];
 
@@ -822,8 +703,10 @@ exports.createProformaRevision = async (req, res) => {
       const total = quantity * rate;
       subtotal += total;
 
+      const validProdId = (item.productId && isValidObjectId(item.productId)) ? item.productId : null;
+
       proformaItems.push({
-        productId: item.productId || null,
+        productId: validProdId,
         productName: item.productName || 'Product',
         description: item.description || '',
         quantity,
@@ -868,6 +751,7 @@ exports.createProformaRevision = async (req, res) => {
     const rounding = Number((grandTotal - rawTotal).toFixed(2));
 
     const newRevision = (current.revision || 0) + 1;
+    const finalCurrency = currency || current.currency || ((type || current.type) === 'international' ? 'USD' : 'INR');
 
     const revisedProforma = {
       number: proformaNumber,
@@ -895,6 +779,7 @@ exports.createProformaRevision = async (req, res) => {
       channel: channel || current.channel || 'Domestic',
       salesPerson: salesPerson || current.salesPerson || '',
       exchangeRate: String(exchangeRate || current.exchangeRate || '1'),
+      currency: finalCurrency,
       deliveryTime: deliveryTime || current.deliveryTime || '15 Days',
       validUntil: current.validUntil || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       paymentTerms: paymentTerms || current.paymentTerms || '100% Advance',
@@ -903,7 +788,7 @@ exports.createProformaRevision = async (req, res) => {
       notes: notes !== undefined ? notes : current.notes,
       terms: terms !== undefined ? terms : current.terms,
       document: `Proforma ${proformaNumber} (Rev ${newRevision})`,
-      totalInWords: totalInWords || `${(type || current.type) === 'domestic' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(grandTotal)} Only`,
+      totalInWords: totalInWords || `${finalCurrency === 'INR' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(grandTotal)} Only`,
       portOfLoading: portOfLoading || current.portOfLoading || '',
       portOfDischarge: portOfDischarge || current.portOfDischarge || '',
       destinationCountry: destinationCountry || current.destinationCountry || '',
@@ -919,11 +804,11 @@ exports.createProformaRevision = async (req, res) => {
       incentive: 0,
       profit: 0,
       conversionDate: null,
-      createdBy: req.user.id,
+      createdBy: req.user?.id || req.user?._id || null,
       revisionNote: revisionNote || `Revision ${newRevision}`
     };
 
-    lead.proformas.push(revisedProforma);
+   lead.proformas.unshift(revisedProforma);
     lead.proforma = revisedProforma;
 
     lead.markModified('proformas');
@@ -1188,6 +1073,8 @@ exports.convertProformaToInvoice = async (req, res) => {
     const finalTotal = Number(proforma.total) || 0;
     const finalRounding = proforma.rounding != null ? Number(proforma.rounding) : 0;
 
+    const finalCurrency = proforma.currency || lead.currency || (proforma.type === 'international' ? 'USD' : 'INR');
+
     const invoiceData = {
       invoiceNumber,
       type: proforma.type || 'domestic',
@@ -1195,6 +1082,9 @@ exports.convertProformaToInvoice = async (req, res) => {
       dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       placeOfSupply: proforma.placeOfSupply || 'Gujarat (24)',
       paymentTerms: proforma.paymentTerms || '100% Advance',
+      currency: finalCurrency,
+      exchangeRate: parseFloat(proforma.exchangeRate) || 1,
+
       customer: {
         name: lead.name,
         phone: lead.phone,
@@ -1243,7 +1133,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       proformaNumber: proforma.number,
       leadId: lead._id,
       status: 'draft',
-      createdBy: req.user.id,
+      createdBy: req.user?.id || req.user?._id || null,
       incentive: totalIncentive,
       profit: totalProfit,
       profitPercentage: overallProfitPercentage,
@@ -1253,16 +1143,12 @@ exports.convertProformaToInvoice = async (req, res) => {
       totalCost
     };
 
-    // ===== DEDUCT STOCK FROM RESERVATION =====
-    try {
-      await deductStockFromReservation(proforma.items || []);
-    } catch (err) {
-      console.error('Stock deduction on convert failed:', err);
-    }
+    // ===== 🚀 DEDUCT STOCK DIRECTLY ON INVOICE CONVERSION =====
+    await deductStockForItems(proforma.items || []);
 
     const invoice = new Invoice(invoiceData);
 
-    // ===== HANDLE INITIAL PAYMENT =====
+    // ===== INITIAL PAYMENT =====
     const initPay = parseFloat(initialPayment) || 0;
     if (initPay > 0) {
       invoice.payments = [{
@@ -1271,7 +1157,7 @@ exports.convertProformaToInvoice = async (req, res) => {
         method: paymentMethod || 'advance',
         reference: paymentReference || '',
         notes: paymentNotes || 'Initial payment at conversion',
-        receivedBy: req.user.id
+        receivedBy: req.user?.id || req.user?._id || null
       }];
       invoice.paidAmount = Math.round(initPay * 100) / 100;
       invoice.dueAmount = Math.max(0, Math.round((invoice.total - initPay) * 100) / 100);
@@ -1334,14 +1220,14 @@ exports.convertProformaToInvoice = async (req, res) => {
         status: 'converted',
         date: new Date(),
         notes: `✅ Converted proforma ${proforma.number} to invoice ${invoiceNumber}`,
-        updatedBy: req.user.id
+        updatedBy: req.user?.id || req.user?._id || null
       });
     }
 
     await lead.save();
     await lead.populate('assignedTo', 'name email');
 
-    // Credit incentive to salesman
+    // Salesman Incentive
     if (lead.assignedTo && totalIncentive > 0) {
       try {
         const salesman = await User.findById(lead.assignedTo._id || lead.assignedTo);
@@ -1390,12 +1276,6 @@ exports.convertProformaToInvoice = async (req, res) => {
           value: totalValue,
           profitPercentage: overallProfitPercentage,
           proformaNumber: proforma.number
-        },
-        cumulativeIncentive: {
-          total: lead.totalIncentive,
-          profit: lead.totalProfit,
-          value: lead.totalValue,
-          salesman: lead.assignedTo?.name || lead.assignedToName || 'Unassigned'
         }
       },
       message: `✅ Invoice ${invoiceNumber} created from proforma ${proforma.number} | Incentive: ₹${totalIncentive.toFixed(2)}`
@@ -1411,12 +1291,12 @@ exports.convertProformaToInvoice = async (req, res) => {
 };
 
 // ============================================
-// ✅ DELETE PROFORMA (with Stock Release)
+// ✅ DELETE PROFORMA (CLEAN & DIRECT DELETION)
 // ============================================
 exports.deleteProforma = async (req, res) => {
   try {
     const { id } = req.params;
-    const proformaNumber = req.query.proformaNumber;
+    const proformaNumber = req.query.proformaNumber ? req.query.proformaNumber.trim() : '';
     
     if (!proformaNumber) {
       return res.status(400).json({
@@ -1430,55 +1310,37 @@ exports.deleteProforma = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    // Prefer latest revision
-    let targetIndex = lead.proformas.findIndex(p => p.number === proformaNumber && p.isLatest !== false);
-    if (targetIndex === -1) {
-      targetIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
-    }
+    // Check if already converted to invoice
+    const isConvertedInArray = (lead.proformas || []).some(
+      p => p.number === proformaNumber && p.convertedToInvoice
+    );
+    const isConvertedInSingle = lead.proforma && lead.proforma.number === proformaNumber && lead.proforma.convertedToInvoice;
 
-    if (targetIndex === -1) {
-      if (lead.proforma && lead.proforma.number === proformaNumber) {
-        await releaseStockForItems(lead.proforma.items || []);
-        lead.proforma = null;
-        if (lead.proformas.length === 0) {
-          lead.status = 'qualified';
-        }
-        await lead.save();
-        return res.json({
-          success: true,
-          message: `✅ Proforma ${proformaNumber} deleted successfully`
-        });
-      }
-      
-      return res.status(404).json({ 
-        success: false, 
-        message: `Proforma ${proformaNumber} not found` 
-      });
-    }
-
-    const proformaToDelete = lead.proformas[targetIndex];
-
-    if (proformaToDelete.convertedToInvoice) {
+    if (isConvertedInArray || isConvertedInSingle) {
       return res.status(400).json({
         success: false,
-        message: `Cannot delete proforma ${proformaNumber} as it has been converted to invoice ${proformaToDelete.invoiceNumber}`
+        message: `⚠️ Cannot delete proforma ${proformaNumber} as it has been converted to an invoice.`
       });
     }
 
-    // ===== RELEASE STOCK =====
-    await releaseStockForItems(proformaToDelete.items || []);
+    // Remove from proformas array
+    if (lead.proformas && lead.proformas.length > 0) {
+      lead.proformas = lead.proformas.filter(p => p.number !== proformaNumber);
+    }
 
-    lead.proformas.splice(targetIndex, 1);
+    // Clean single proforma object if matching
+    if (lead.proforma && lead.proforma.number === proformaNumber) {
+      lead.proforma = lead.proformas && lead.proformas.length > 0
+        ? lead.proformas[lead.proformas.length - 1]
+        : null;
+    }
 
-    if (lead.proformas.length === 0) {
-      lead.status = 'qualified';
+    // Status update if no proformas remain
+    if (!lead.proformas || lead.proformas.length === 0) {
+      if (lead.status === 'proforma_sent') {
+        lead.status = 'qualified';
+      }
       lead.proforma = null;
-    } else {
-      // Set latest remaining version as current
-      const remainingLatest = lead.proformas.filter(p => p.isLatest !== false);
-      lead.proforma = remainingLatest.length
-        ? remainingLatest[remainingLatest.length - 1]
-        : lead.proformas[lead.proformas.length - 1];
     }
 
     lead.markModified('proformas');
@@ -1491,7 +1353,7 @@ exports.deleteProforma = async (req, res) => {
     });
   } catch (error) {
     console.error('Delete proforma error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete proforma' });
   }
 };
 
@@ -1665,7 +1527,7 @@ exports.updateLeadStatus = async (req, res) => {
       status: status,
       date: new Date(),
       notes: notes || `Status updated from ${oldStatus} to ${status}`,
-      updatedBy: req.user.id
+      updatedBy: req.user?.id || req.user?._id || null
     });
 
     await lead.save();
