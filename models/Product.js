@@ -6,10 +6,11 @@ const BatchSchema = new mongoose.Schema({
   mfgDate: { type: String, default: "" },
   expDate: { type: String, default: "" },
   quantity: { type: Number, default: 0 },
+  reservedQuantity: { type: Number, default: 0 }, // ← Stock Reservation
   mrp: { type: Number, default: 0 },
   costPrice: { type: Number, default: 0 },
   sellingPrice: { type: Number, default: 0 },
-  supplierName: { type: String, default: "" }, // ⭐ YEH ZAROORI HAI
+  supplierName: { type: String, default: "" },
   supplier: { type: mongoose.Schema.Types.Mixed, default: null },
   packing: { type: String, default: "N/A" },
   grossWeight: { type: Number, default: 0 },
@@ -23,14 +24,14 @@ const BatchSchema = new mongoose.Schema({
   reason: { type: String, default: "Stock addition" },
 });
 
-// ========== STOCK MOVEMENT HISTORY (for Non-Batch) ==========
+// ========== STOCK MOVEMENT HISTORY ==========
 const StockMovementSchema = new mongoose.Schema({
-  type: { type: String, enum: ["add", "remove"], required: true },
+  type: { type: String, enum: ["add", "remove", "reserve", "release"], required: true },
   quantity: { type: Number, required: true },
   mrp: { type: Number, default: 0 },
   costPrice: { type: Number, default: 0 },
   sellingPrice: { type: Number, default: 0 },
-  supplierName: { type: String, default: "" }, // ⭐ YEH ZAROORI HAI
+  supplierName: { type: String, default: "" },
   reason: { type: String, default: "" },
   addedBy: { type: String, default: "System" },
   date: { type: Date, default: Date.now },
@@ -60,6 +61,7 @@ const ProductSchema = new mongoose.Schema(
       currency: { type: String, default: "INR" },
     },
     stock: { type: Number, default: 0 },
+    reservedStock: { type: Number, default: 0 }, // ← Stock Reservation
     minStock: { type: Number, default: 0 },
     maxStock: { type: Number, default: 0 },
     reorderLevel: { type: Number, default: 0 },
@@ -89,22 +91,27 @@ ProductSchema.index({ createdAt: -1 });
 ProductSchema.pre("save", function () {
   if (this.productType === "batch") {
     let totalStock = 0;
+    let totalReserved = 0;
     if (Array.isArray(this.batches) && this.batches.length > 0) {
       this.batches.forEach((batch) => {
         totalStock += Number(batch.quantity) || 0;
+        totalReserved += Number(batch.reservedQuantity) || 0;
       });
     }
     this.stock = totalStock;
+    this.reservedStock = totalReserved;
   } else {
     this.batches = [];
   }
 
-  // Status calculation
-  if (this.stock <= 0) {
+  // Status based on AVAILABLE stock (Physical - Reserved)
+  const available = (this.stock || 0) - (this.reservedStock || 0);
+
+  if (available <= 0) {
     this.status = "inactive";
-  } else if (this.reorderLevel > 0 && this.stock <= this.reorderLevel) {
+  } else if (this.reorderLevel > 0 && available <= this.reorderLevel) {
     this.status = "critical";
-  } else if (this.minStock > 0 && this.stock <= this.minStock) {
+  } else if (this.minStock > 0 && available <= this.minStock) {
     this.status = "low_stock";
   } else {
     this.status = "active";

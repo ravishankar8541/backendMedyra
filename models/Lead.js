@@ -1,93 +1,40 @@
-// models/Lead.js - COMPLETE UPDATED VERSION WITH FREIGHT & METADATA
 const mongoose = require('mongoose');
 
-// ✅ LeadItemSchema - ITEMS ONLY
+// ✅ LeadItemSchema
 const LeadItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product'
   },
-  productName: {
-    type: String,
-    default: ''
-  },
-  productSku: {
-    type: String,
-    default: ''
-  },
-  description: {
-    type: String,
-    default: ''
-  },
-  sellingPrice: {
-    type: Number,
-    default: 0
-  },
-  rate: {
-    type: Number,
-    default: 0
-  },
-  costPrice: {
-    type: Number,
-    default: 0
-  },
-  quantity: {
-    type: Number,
-    default: 1
-  },
-  unit: {
-    type: String,
-    default: 'Vial'
-  },
-  totalValue: {
-    type: Number,
-    default: 0
-  },
-  total: {
-    type: Number,
-    default: 0
-  },
-  taxRate: {
-    type: Number,
-    default: 0
-  },
-  profitAmount: {
-    type: Number,
-    default: 0
-  },
-  profitPercentage: {
-    type: Number,
-    default: 0
-  },
-  incentive: {
-    type: Number,
-    default: 0
-  },
-  batch: {
-    type: String,
-    default: ''
-  },
-  hsCode: {
-    type: String,
-    default: ''
-  },
-  mfgDate: {
-    type: String,
-    default: ''
-  },
-  expiryDate: {
-    type: String,
-    default: ''
-  },
-  countryOfOrigin: {
-    type: String,
-    default: 'India'
-  }
+  productName: { type: String, default: '' },
+  productSku: { type: String, default: '' },
+  description: { type: String, default: '' },
+  sellingPrice: { type: Number, default: 0 },
+  rate: { type: Number, default: 0 },
+  costPrice: { type: Number, default: 0 },
+  quantity: { type: Number, default: 1 },
+  unit: { type: String, default: 'Vial' },
+  totalValue: { type: Number, default: 0 },
+  total: { type: Number, default: 0 },
+  taxRate: { type: Number, default: 0 },
+  profitAmount: { type: Number, default: 0 },
+  profitPercentage: { type: Number, default: 0 },
+  incentive: { type: Number, default: 0 },
+  batch: { type: String, default: '' },
+  batchIndex: { type: Number, default: -1 },
+  hsCode: { type: String, default: '' },
+  mfgDate: { type: String, default: '' },
+  expiryDate: { type: String, default: '' },
+  countryOfOrigin: { type: String, default: 'India' }
 });
 
-// ✅ ProformaSchema - INCLUDES ALL FREIGHT & METADATA FIELDS
+// ✅ SINGLE ProformaSchema (with Revision History)
 const ProformaSchema = new mongoose.Schema({
   number: String,
+  revision: { type: Number, default: 0 },
+  isLatest: { type: Boolean, default: true },
+  parentProformaId: { type: String, default: null },
+
   sentDate: Date,
   amount: Number,
   type: {
@@ -100,64 +47,27 @@ const ProformaSchema = new mongoose.Schema({
     enum: ['cgst_sgst', 'igst'],
     default: 'cgst_sgst'
   },
-  poNumber: {
-    type: String,
-    default: ''
-  },
+  poNumber: { type: String, default: '' },
   items: [LeadItemSchema],
   subtotal: Number,
   tax: Number,
   total: Number,
-  
-  // ===== FREIGHT & METADATA FIELDS =====
-  freight: {
-    type: Number,
-    default: 0
-  },
-  freightTaxRate: {
-    type: Number,
-    default: 0
-  },
-  freightQty: {
-    type: Number,
-    default: 1
-  },
-  freightTax: {
-    type: Number,
-    default: 0
-  },
-  insurance: {
-  type: Number,
-  default: 0
-},
-insuranceTaxRate: {
-  type: Number,
-  default: 0
-},
-insuranceQty: {
-  type: Number,
-  default: 1
-},
-insuranceTax: {
-  type: Number,
-  default: 0
-},
-  channel: {
-    type: String,
-    default: 'Domestic'
-  },
-  salesPerson: {
-    type: String,
-    default: ''
-  },
-  exchangeRate: {
-    type: String,
-    default: '1'
-  },
-  deliveryTime: {
-    type: String,
-    default: '15 Days'
-  },
+  rounding: { type: Number, default: 0 },
+
+  // Freight & Insurance
+  freight: { type: Number, default: 0 },
+  freightTaxRate: { type: Number, default: 0 },
+  freightQty: { type: Number, default: 1 },
+  freightTax: { type: Number, default: 0 },
+  insurance: { type: Number, default: 0 },
+  insuranceTaxRate: { type: Number, default: 0 },
+  insuranceQty: { type: Number, default: 1 },
+  insuranceTax: { type: Number, default: 0 },
+
+  channel: { type: String, default: 'Domestic' },
+  salesPerson: { type: String, default: '' },
+  exchangeRate: { type: String, default: '1' },
+  deliveryTime: { type: String, default: '15 Days' },
 
   validUntil: Date,
   paymentTerms: String,
@@ -177,148 +87,55 @@ insuranceTax: {
   totalBoxes: String,
   shippingMark: String,
   vesselNo: String,
-  convertedToInvoice: {
-    type: Boolean,
-    default: false
-  },
-  invoiceNumber: {
-    type: String,
-    default: ''
-  },
-  incentive: {
-    type: Number,
-    default: 0
-  },
-  profit: {
-    type: Number,
-    default: 0
-  },
-  conversionDate: {
-    type: Date
-  }
+
+  convertedToInvoice: { type: Boolean, default: false },
+  invoiceNumber: { type: String, default: '' },
+  incentive: { type: Number, default: 0 },
+  profit: { type: Number, default: 0 },
+  conversionDate: { type: Date },
+
+  // Revision tracking
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  revisionNote: { type: String, default: '' }
 });
 
 // ✅ MAIN LEAD SCHEMA
 const LeadSchema = new mongoose.Schema({
-  // ===== BASIC INFO =====
-  name: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  companyName: {
-    type: String,
-    default: ''
-  },
-  contactPerson: {
-    type: String,
-    default: ''
-  },
-  phone: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  alternativePhone: {
-    type: String,
-    default: ''
-  },
-  email: {
-    type: String,
-    trim: true,
-    lowercase: true
-  },
-  website: {
-    type: String,
-    default: ''
-  },
+  name: { type: String, required: true, trim: true },
+  companyName: { type: String, default: '' },
+  contactPerson: { type: String, default: '' },
+  phone: { type: String, required: true, trim: true },
+  alternativePhone: { type: String, default: '' },
+  email: { type: String, trim: true, lowercase: true },
+  website: { type: String, default: '' },
   source: {
     type: String,
     enum: ['Website', 'Reference', 'Cold Call', 'Email', 'Social Media', 'Walk-in'],
     default: 'Website'
   },
-  notes: {
-    type: String,
-    maxlength: 1000
-  },
+  notes: { type: String, maxlength: 1000 },
 
-  // ===== ADDRESS =====
-  address: {
-    type: String,
-    default: ''
-  },
-  city: {
-    type: String,
-    default: ''
-  },
-  state: {
-    type: String,
-    default: ''
-  },
-  stateCode: {
-    type: String,
-    default: ''
-  },
-  country: {
-    type: String,
-    default: 'India'
-  },
-  countryCode: {
-    type: String,
-    default: 'IN'
-  },
-  postalCode: {
-    type: String,
-    default: ''
-  },
+  address: { type: String, default: '' },
+  city: { type: String, default: '' },
+  state: { type: String, default: '' },
+  stateCode: { type: String, default: '' },
+  country: { type: String, default: 'India' },
+  countryCode: { type: String, default: 'IN' },
+  postalCode: { type: String, default: '' },
 
-  // ===== TAX & REGISTRATION =====
-  gst: {
-    type: String,
-    default: ''
-  },
-  drugLicense: {
-    type: String,
-    default: ''
-  },
-  ntfnNumber: {
-    type: String,
-    default: ''
-  },
-  businessType: {
-    type: String,
-    default: 'distributor'
-  },
+  gst: { type: String, default: '' },
+  drugLicense: { type: String, default: '' },
+  ntfnNumber: { type: String, default: '' },
+  businessType: { type: String, default: 'distributor' },
 
-  // ===== BANK DETAILS =====
-  bankName: {
-    type: String,
-    default: ''
-  },
-  accountTitle: {
-    type: String,
-    default: ''
-  },
-  accountNumber: {
-    type: String,
-    default: ''
-  },
-  branchCode: {
-    type: String,
-    default: ''
-  },
+  bankName: { type: String, default: '' },
+  accountTitle: { type: String, default: '' },
+  accountNumber: { type: String, default: '' },
+  branchCode: { type: String, default: '' },
 
-  // ===== PAYMENT & CURRENCY =====
-  paymentTerms: {
-    type: String,
-    default: 'net_30'
-  },
-  currency: {
-    type: String,
-    default: 'INR'
-  },
+  paymentTerms: { type: String, default: 'net_30' },
+  currency: { type: String, default: 'INR' },
 
-  // ===== STATUS =====
   status: {
     type: String,
     enum: [
@@ -328,14 +145,9 @@ const LeadSchema = new mongoose.Schema({
     default: 'new'
   },
 
-  // ===== PROFORMAS =====
-  proformas: {
-    type: [ProformaSchema],
-    default: []
-  },
+  proformas: { type: [ProformaSchema], default: [] },
   proforma: ProformaSchema,
 
-  // ===== QUOTATION =====
   quotation: {
     sentDate: Date,
     amount: Number,
@@ -346,7 +158,6 @@ const LeadSchema = new mongoose.Schema({
 
   orderConfirmedAt: Date,
 
-  // ===== PAYMENT =====
   payment: {
     status: {
       type: String,
@@ -364,25 +175,11 @@ const LeadSchema = new mongoose.Schema({
     notes: String
   },
 
-  // ===== ITEMS =====
-  items: {
-    type: [LeadItemSchema],
-    default: []
-  },
+  items: { type: [LeadItemSchema], default: [] },
 
-  // ===== INCENTIVE TRACKING =====
-  totalValue: {
-    type: Number,
-    default: 0
-  },
-  totalProfit: {
-    type: Number,
-    default: 0
-  },
-  totalIncentive: {
-    type: Number,
-    default: 0
-  },
+  totalValue: { type: Number, default: 0 },
+  totalProfit: { type: Number, default: 0 },
+  totalIncentive: { type: Number, default: 0 },
   value: { type: Number, default: 0 },
   profit: { type: Number, default: 0 },
   incentive: { type: Number, default: 0 },
@@ -390,49 +187,28 @@ const LeadSchema = new mongoose.Schema({
   productSku: { type: String, default: '' },
   quantity: { type: Number, default: 1 },
 
-  // ===== ASSIGNMENT =====
-  assignedTo: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  assignedToName: {
-    type: String
-  },
-  createdBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
+  assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  assignedToName: { type: String },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
-  // ===== DATES =====
-  date: {
-    type: Date,
-    default: Date.now
-  },
+  date: { type: Date, default: Date.now },
   followUpDate: Date,
   followUpNotes: String,
   conversionDate: Date,
   lastContact: Date,
 
-  // ===== STATUS HISTORY =====
   statusHistory: [{
     status: String,
     date: { type: Date, default: Date.now },
     notes: String,
-    updatedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User'
-    }
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   }]
-}, {
-  timestamps: true
-});
+}, { timestamps: true });
 
-// ===== INDEXES =====
 LeadSchema.index({ name: 'text', phone: 'text', email: 'text' });
 LeadSchema.index({ status: 1, assignedTo: 1 });
 LeadSchema.index({ createdAt: -1 });
 
-// ===== PRE-SAVE HOOK =====
 LeadSchema.pre('save', function () {
   if (this._skipAutoCalculate === true) {
     if (this.isModified('status')) {

@@ -1,12 +1,157 @@
-// controllers/leadController.js - COMPLETE FIXED VERSION (WITH FREIGHT SAVING)
+const Product = require('../models/Product');
 const Lead = require('../models/Lead');
 const Revenue = require('../models/Revenue');
 const User = require('../models/User');
-const Product = require('../models/Product');
 const Invoice = require('../models/Invoice');
 
-// ============================================
-// ✅ INCENTIVE CALCULATION
+const reserveStockForItems = async (items = []) => {
+  for (const item of items) {
+    if (!item.productId || !item.quantity) continue;
+
+    const product = await Product.findById(item.productId);
+    if (!product) continue;
+
+    let qty = parseInt(item.quantity) || 0;
+    if (qty <= 0) continue;
+
+    if (product.productType === 'batch') {
+      let remaining = qty;
+      let usedBatchNumber = item.batch || null;
+
+      // Same batch number ke saare entries lo
+      let candidateBatches = [];
+      if (item.batch) {
+        candidateBatches = (product.batches || []).filter(
+          (b) => b.batchNumber === item.batch
+        );
+      }
+
+      // FEFO fallback agar batch select nahi hai
+      if (candidateBatches.length === 0) {
+        candidateBatches = [...(product.batches || [])]
+          .filter((b) => (b.quantity || 0) - (b.reservedQuantity || 0) > 0)
+          .sort(
+            (a, b) =>
+              new Date(a.expDate || '9999-12-31') -
+              new Date(b.expDate || '9999-12-31')
+          );
+      } else {
+        candidateBatches.sort(
+          (a, b) =>
+            new Date(a.expDate || '9999-12-31') -
+            new Date(b.expDate || '9999-12-31')
+        );
+      }
+
+      for (const batch of candidateBatches) {
+        if (remaining <= 0) break;
+
+        const available = (batch.quantity || 0) - (batch.reservedQuantity || 0);
+        if (available <= 0) continue;
+
+        const take = Math.min(available, remaining);
+        batch.reservedQuantity = (batch.reservedQuantity || 0) + take;
+        remaining -= take;
+        usedBatchNumber = batch.batchNumber;
+      }
+
+      if (remaining > 0) {
+        throw new Error(
+          `Insufficient available stock for "${product.name}"${
+            item.batch ? ` (Batch ${item.batch})` : ''
+          }. Available: ${qty - remaining}, Required: ${qty}`
+        );
+      }
+
+      item.batch = usedBatchNumber;
+    } else {
+      const available = (product.stock || 0) - (product.reservedStock || 0);
+      if (available < qty) {
+        throw new Error(
+          `Insufficient available stock for "${product.name}". Available: ${available}, Required: ${qty}`
+        );
+      }
+      product.reservedStock = (product.reservedStock || 0) + qty;
+    }
+
+    await product.save();
+  }
+};
+
+const releaseStockForItems = async (items = []) => {
+  for (const item of items) {
+    if (!item.productId || !item.quantity) continue;
+
+    const product = await Product.findById(item.productId);
+    if (!product) continue;
+
+    let remaining = parseInt(item.quantity) || 0;
+    if (remaining <= 0) continue;
+
+    if (product.productType === 'batch' && item.batch) {
+      const matching = (product.batches || []).filter(
+        (b) => b.batchNumber === item.batch
+      );
+
+      for (const batch of matching) {
+        if (remaining <= 0) break;
+        const reserved = batch.reservedQuantity || 0;
+        if (reserved <= 0) continue;
+
+        const releaseQty = Math.min(reserved, remaining);
+        batch.reservedQuantity = reserved - releaseQty;
+        remaining -= releaseQty;
+      }
+    } else {
+      product.reservedStock = Math.max(
+        0,
+        (product.reservedStock || 0) - remaining
+      );
+    }
+
+    await product.save();
+  }
+};
+
+const deductStockFromReservation = async (items = []) => {
+  for (const item of items) {
+    if (!item.productId || !item.quantity) continue;
+
+    const product = await Product.findById(item.productId);
+    if (!product) continue;
+
+    let remaining = parseInt(item.quantity) || 0;
+    if (remaining <= 0) continue;
+
+    if (product.productType === 'batch' && item.batch) {
+      const matching = (product.batches || []).filter(
+        (b) => b.batchNumber === item.batch
+      );
+
+      for (const batch of matching) {
+        if (remaining <= 0) break;
+
+        const reserved = batch.reservedQuantity || 0;
+        const takeFromReserved = Math.min(reserved, remaining);
+        batch.reservedQuantity = reserved - takeFromReserved;
+
+        const takeFromQty = Math.min(batch.quantity || 0, remaining);
+        batch.quantity = Math.max(0, (batch.quantity || 0) - takeFromQty);
+
+        remaining -= takeFromQty;
+      }
+    } else {
+      product.reservedStock = Math.max(
+        0,
+        (product.reservedStock || 0) - remaining
+      );
+      product.stock = Math.max(0, (product.stock || 0) - remaining);
+    }
+
+    await product.save();
+  }
+};
+
 // ============================================
 const calculateIncentive = (revenue, profitPercentage) => {
   if (profitPercentage >= 35) {
@@ -111,7 +256,7 @@ exports.createLead = async (req, res) => {
 };
 
 // ============================================
-// ✅ UPDATE LEAD (FIXED - PROFORMA + markModified)
+// ✅ UPDATE LEAD
 // ============================================
 exports.updateLead = async (req, res) => {
   try {
@@ -144,16 +289,14 @@ exports.updateLead = async (req, res) => {
       lead.type = 'domestic';
     }
 
-    // 🟢 FIXED: Update specific proforma correctly
+    // Update specific proforma
     if (updateData.proforma) {
       const incoming = updateData.proforma;
       const targetNumber = updateData.proformaNumber || incoming.number;
 
-      // Update in proformas[] array
       if (lead.proformas && lead.proformas.length > 0 && targetNumber) {
         const pIndex = lead.proformas.findIndex(p => p.number === targetNumber);
         if (pIndex !== -1) {
-          // Keep original number & converted flags, update everything else
           const existing = lead.proformas[pIndex].toObject
             ? lead.proformas[pIndex].toObject()
             : { ...lead.proformas[pIndex] };
@@ -161,7 +304,7 @@ exports.updateLead = async (req, res) => {
           lead.proformas[pIndex] = {
             ...existing,
             ...incoming,
-            number: existing.number, // never change number
+            number: existing.number,
             convertedToInvoice: existing.convertedToInvoice,
             invoiceNumber: existing.invoiceNumber,
             conversionDate: existing.conversionDate
@@ -169,7 +312,6 @@ exports.updateLead = async (req, res) => {
         }
       }
 
-      // Also update singular proforma if it matches
       if (lead.proforma && lead.proforma.number === targetNumber) {
         const existing = lead.proforma.toObject
           ? lead.proforma.toObject()
@@ -184,11 +326,9 @@ exports.updateLead = async (req, res) => {
           conversionDate: existing.conversionDate
         };
       } else if (!lead.proforma && incoming) {
-        // fallback
         lead.proforma = incoming;
       }
 
-      // 🔥 CRITICAL — without this mongoose does not save nested changes
       lead.markModified('proformas');
       lead.markModified('proforma');
     }
@@ -235,7 +375,7 @@ exports.updateLead = async (req, res) => {
 };
 
 // ============================================
-// ✅ GENERATE PROFORMA (FIXED TAX + ROUNDING)
+// ✅ GENERATE PROFORMA (with Stock Reservation + Versioning)
 // ============================================
 exports.generateProforma = async (req, res) => {
   try {
@@ -257,15 +397,12 @@ exports.generateProforma = async (req, res) => {
       notes = '',
       terms = 'This is a proforma invoice. Prices are valid for 7 days.',
       totalInWords = '',
-      // Freight
       freight = 0,
       freightTaxRate = 18,
       freightQty = 1,
-      // Insurance
       insurance = 0,
       insuranceTaxRate = 18,
       insuranceQty = 1,
-      // Other
       channel = 'Domestic',
       salesPerson = '',
       exchangeRate = '1',
@@ -301,8 +438,8 @@ exports.generateProforma = async (req, res) => {
       const quantity = parseInt(item.quantity) || 1;
       const rate = parseFloat(item.rate) || 0;
       const taxRate = item.taxRate !== undefined && item.taxRate !== null && item.taxRate !== ''
-  ? parseFloat(item.taxRate)
-  : 18;
+        ? parseFloat(item.taxRate)
+        : 18;
       const total = quantity * rate;
       subtotal += total;
 
@@ -362,7 +499,17 @@ exports.generateProforma = async (req, res) => {
       });
     }
 
-    // ===== TAX + FREIGHT + INSURANCE (CORRECT – NO DOUBLE TAX) =====
+    // ===== RESERVE STOCK (before creating proforma) =====
+    try {
+      await reserveStockForItems(proformaItems);
+    } catch (stockErr) {
+      return res.status(400).json({
+        success: false,
+        message: stockErr.message || 'Stock reservation failed'
+      });
+    }
+
+    // ===== TAX + FREIGHT + INSURANCE =====
     let itemTax = 0;
     proformaItems.forEach(item => {
       itemTax += (item.total * (item.taxRate || 0)) / 100;
@@ -371,20 +518,20 @@ exports.generateProforma = async (req, res) => {
 
     const parsedFreight = parseFloat(freight) || 0;
     const parsedFreightTaxRate = freightTaxRate !== undefined && freightTaxRate !== null && freightTaxRate !== ''
-  ? parseFloat(freightTaxRate)
-  : 18;
+      ? parseFloat(freightTaxRate)
+      : 18;
     const freightTax = Math.round((parsedFreight * parsedFreightTaxRate) / 100 * 100) / 100;
 
     const parsedInsurance = parseFloat(insurance) || 0;
- const parsedInsuranceTaxRate = insuranceTaxRate !== undefined && insuranceTaxRate !== null && insuranceTaxRate !== ''
-  ? parseFloat(insuranceTaxRate)
-  : 18;
+    const parsedInsuranceTaxRate = insuranceTaxRate !== undefined && insuranceTaxRate !== null && insuranceTaxRate !== ''
+      ? parseFloat(insuranceTaxRate)
+      : 18;
     const insuranceTax = Math.round((parsedInsurance * parsedInsuranceTaxRate) / 100 * 100) / 100;
 
     const totalTax = itemTax + freightTax + insuranceTax;
     const rawTotal = subtotal + parsedFreight + parsedInsurance + totalTax;
-    const grandTotal = Math.round(rawTotal);                         // nearest rupee
-    const rounding = Number((grandTotal - rawTotal).toFixed(2));     // small value only
+    const grandTotal = Math.round(rawTotal);
+    const rounding = Number((grandTotal - rawTotal).toFixed(2));
 
     // ===== Generate Proforma Number =====
     const year = new Date().getFullYear();
@@ -450,9 +597,12 @@ exports.generateProforma = async (req, res) => {
     const existingProfit = lead.profit || 0;
     const existingValue = lead.value || 0;
 
-    // ===== CREATE PROFORMA OBJECT =====
+    // ===== CREATE PROFORMA OBJECT (with versioning fields) =====
     const newProforma = {
       number: proformaNumber,
+      revision: 0,
+      isLatest: true,
+      parentProformaId: null,
       sentDate: new Date(),
       amount: grandTotal,
       type: proformaType,
@@ -462,15 +612,13 @@ exports.generateProforma = async (req, res) => {
       subtotal,
       tax: totalTax,
       total: grandTotal,
-      rounding,                                    // ← stored
+      rounding,
 
-      // Freight
       freight: parsedFreight,
       freightTaxRate: parsedFreightTaxRate,
       freightQty: parseInt(freightQty) || 1,
       freightTax,
 
-      // Insurance
       insurance: parsedInsurance,
       insuranceTaxRate: parsedInsuranceTaxRate,
       insuranceQty: parseInt(insuranceQty) || 1,
@@ -502,7 +650,9 @@ exports.generateProforma = async (req, res) => {
       invoiceNumber: '',
       incentive: 0,
       profit: 0,
-      conversionDate: null
+      conversionDate: null,
+      createdBy: req.user.id,
+      revisionNote: 'Original Proforma'
     };
 
     if (!lead.proformas) lead.proformas = [];
@@ -559,7 +709,242 @@ exports.generateProforma = async (req, res) => {
 };
 
 // ============================================
-// ✅ CONVERT PROFORMA TO INVOICE (WITH FREIGHT + INSURANCE + INITIAL PAYMENT)
+// ✅ CREATE PROFORMA REVISION
+// ============================================
+exports.createProformaRevision = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    const {
+      proformaNumber,
+      revisionNote = '',
+      items = [],
+      type,
+      taxType,
+      poNumber,
+      freight = 0,
+      freightTaxRate = 18,
+      freightQty = 1,
+      insurance = 0,
+      insuranceTaxRate = 18,
+      insuranceQty = 1,
+      channel,
+      salesPerson,
+      exchangeRate,
+      deliveryTime,
+      placeOfSupply,
+      notes,
+      terms,
+      totalInWords,
+      portOfLoading,
+      portOfDischarge,
+      destinationCountry,
+      grossWeight,
+      netWeight,
+      volumetricWeight,
+      countryOfOriginGoods,
+      totalBoxes,
+      shippingMark,
+      vesselNo,
+      paymentTerms,
+      deliveryTerms
+    } = req.body;
+
+    if (!proformaNumber) {
+      return res.status(400).json({ success: false, message: 'proformaNumber is required' });
+    }
+
+    // Find current latest version of this proforma number
+    let current = null;
+    let currentIndex = -1;
+
+    if (lead.proformas && lead.proformas.length) {
+      const sameNumber = lead.proformas
+        .map((p, idx) => ({ p, idx }))
+        .filter(x => x.p.number === proformaNumber)
+        .sort((a, b) => (b.p.revision || 0) - (a.p.revision || 0));
+
+      if (sameNumber.length) {
+        current = sameNumber[0].p;
+        currentIndex = sameNumber[0].idx;
+      }
+    }
+
+    if (!current && lead.proforma && lead.proforma.number === proformaNumber) {
+      current = lead.proforma;
+    }
+
+    if (!current) {
+      return res.status(404).json({ success: false, message: 'Proforma not found' });
+    }
+
+    if (current.convertedToInvoice) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot revise a proforma that is already converted to invoice'
+      });
+    }
+
+    // Release old reservation
+    await releaseStockForItems(current.items || []);
+
+    const newItems = items.length > 0 ? items : (current.items || []);
+
+    // Reserve new quantities
+    try {
+      await reserveStockForItems(newItems);
+    } catch (stockErr) {
+      // Rollback – re-reserve old items
+      await reserveStockForItems(current.items || []);
+      return res.status(400).json({ success: false, message: stockErr.message });
+    }
+
+    // Mark old version as not latest
+    if (currentIndex >= 0) {
+      lead.proformas[currentIndex].isLatest = false;
+    }
+    if (lead.proforma && lead.proforma.number === proformaNumber) {
+      lead.proforma.isLatest = false;
+    }
+
+    // Calculate totals
+    let subtotal = 0;
+    const proformaItems = [];
+
+    for (const item of newItems) {
+      const quantity = parseInt(item.quantity) || 1;
+      const rate = parseFloat(item.rate) || 0;
+      const taxRate = item.taxRate !== undefined && item.taxRate !== null && item.taxRate !== ''
+        ? parseFloat(item.taxRate) : 18;
+      const total = quantity * rate;
+      subtotal += total;
+
+      proformaItems.push({
+        productId: item.productId || null,
+        productName: item.productName || 'Product',
+        description: item.description || '',
+        quantity,
+        unit: item.unit || 'Vial',
+        rate,
+        sellingPrice: rate,
+        taxRate,
+        total,
+        totalValue: total,
+        batch: item.batch || '',
+        batchIndex: item.batchIndex ?? -1,
+        hsCode: item.hsCode || '',
+        mfgDate: item.mfgDate || '',
+        expiryDate: item.expiryDate || '',
+        countryOfOrigin: item.countryOfOrigin || 'India',
+        costPrice: item.costPrice || 0,
+        profitAmount: 0,
+        profitPercentage: 0,
+        incentive: 0
+      });
+    }
+
+    let itemTax = 0;
+    proformaItems.forEach(item => {
+      itemTax += (item.total * (item.taxRate || 0)) / 100;
+    });
+    itemTax = Math.round(itemTax * 100) / 100;
+
+    const parsedFreight = parseFloat(freight) || 0;
+    const parsedFreightTaxRate = freightTaxRate !== undefined && freightTaxRate !== null && freightTaxRate !== ''
+      ? parseFloat(freightTaxRate) : 18;
+    const freightTax = Math.round((parsedFreight * parsedFreightTaxRate) / 100 * 100) / 100;
+
+    const parsedInsurance = parseFloat(insurance) || 0;
+    const parsedInsuranceTaxRate = insuranceTaxRate !== undefined && insuranceTaxRate !== null && insuranceTaxRate !== ''
+      ? parseFloat(insuranceTaxRate) : 18;
+    const insuranceTax = Math.round((parsedInsurance * parsedInsuranceTaxRate) / 100 * 100) / 100;
+
+    const totalTax = itemTax + freightTax + insuranceTax;
+    const rawTotal = subtotal + parsedFreight + parsedInsurance + totalTax;
+    const grandTotal = Math.round(rawTotal);
+    const rounding = Number((grandTotal - rawTotal).toFixed(2));
+
+    const newRevision = (current.revision || 0) + 1;
+
+    const revisedProforma = {
+      number: proformaNumber,
+      revision: newRevision,
+      isLatest: true,
+      parentProformaId: current._id ? String(current._id) : null,
+      sentDate: new Date(),
+      amount: grandTotal,
+      type: type || current.type || 'domestic',
+      taxType: taxType || current.taxType || 'cgst_sgst',
+      poNumber: poNumber || current.poNumber || '',
+      items: proformaItems,
+      subtotal,
+      tax: totalTax,
+      total: grandTotal,
+      rounding,
+      freight: parsedFreight,
+      freightTaxRate: parsedFreightTaxRate,
+      freightQty: parseInt(freightQty) || 1,
+      freightTax,
+      insurance: parsedInsurance,
+      insuranceTaxRate: parsedInsuranceTaxRate,
+      insuranceQty: parseInt(insuranceQty) || 1,
+      insuranceTax,
+      channel: channel || current.channel || 'Domestic',
+      salesPerson: salesPerson || current.salesPerson || '',
+      exchangeRate: String(exchangeRate || current.exchangeRate || '1'),
+      deliveryTime: deliveryTime || current.deliveryTime || '15 Days',
+      validUntil: current.validUntil || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      paymentTerms: paymentTerms || current.paymentTerms || '100% Advance',
+      deliveryTerms: deliveryTerms || current.deliveryTerms || '',
+      placeOfSupply: placeOfSupply || current.placeOfSupply || '',
+      notes: notes !== undefined ? notes : current.notes,
+      terms: terms !== undefined ? terms : current.terms,
+      document: `Proforma ${proformaNumber} (Rev ${newRevision})`,
+      totalInWords: totalInWords || `${(type || current.type) === 'domestic' ? 'Indian Rupee' : 'United States Dollar'} ${Math.round(grandTotal)} Only`,
+      portOfLoading: portOfLoading || current.portOfLoading || '',
+      portOfDischarge: portOfDischarge || current.portOfDischarge || '',
+      destinationCountry: destinationCountry || current.destinationCountry || '',
+      grossWeight: grossWeight || current.grossWeight || '',
+      netWeight: netWeight || current.netWeight || '',
+      volumetricWeight: volumetricWeight || current.volumetricWeight || '',
+      countryOfOriginGoods: countryOfOriginGoods || current.countryOfOriginGoods || 'India',
+      totalBoxes: totalBoxes || current.totalBoxes || '',
+      shippingMark: shippingMark || current.shippingMark || '',
+      vesselNo: vesselNo || current.vesselNo || '',
+      convertedToInvoice: false,
+      invoiceNumber: '',
+      incentive: 0,
+      profit: 0,
+      conversionDate: null,
+      createdBy: req.user.id,
+      revisionNote: revisionNote || `Revision ${newRevision}`
+    };
+
+    lead.proformas.push(revisedProforma);
+    lead.proforma = revisedProforma;
+
+    lead.markModified('proformas');
+    lead.markModified('proforma');
+    await lead.save();
+
+    await lead.populate('assignedTo', 'name email');
+
+    res.json({
+      success: true,
+      data: { lead, proforma: revisedProforma },
+      message: `✅ Proforma ${proformaNumber} (Rev ${newRevision}) created successfully`
+    });
+  } catch (error) {
+    console.error('Create proforma revision error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// ✅ CONVERT PROFORMA TO INVOICE
 // ============================================
 exports.convertProformaToInvoice = async (req, res) => {
   try {
@@ -581,7 +966,10 @@ exports.convertProformaToInvoice = async (req, res) => {
     let proformaIndex = -1;
 
     if (proformaNumber) {
-      proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
+      proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber && p.isLatest !== false);
+      if (proformaIndex === -1) {
+        proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
+      }
       if (proformaIndex !== -1) {
         proforma = lead.proformas[proformaIndex];
       }
@@ -593,7 +981,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     if (!proforma) {
       for (let i = 0; i < (lead.proformas || []).length; i++) {
-        if (!lead.proformas[i].convertedToInvoice) {
+        if (!lead.proformas[i].convertedToInvoice && lead.proformas[i].isLatest !== false) {
           proformaIndex = i;
           proforma = lead.proformas[i];
           break;
@@ -697,17 +1085,15 @@ exports.convertProformaToInvoice = async (req, res) => {
       existingWithNumber = await Invoice.findOne({ invoiceNumber });
     }
 
-    // ===== Incentive calculation variables =====
+    // ===== Incentive calculation =====
     let totalIncentive = 0;
     let totalProfit = 0;
     let totalValue = 0;
     let totalCost = 0;
     let overallProfitPercentage = 0;
 
-    // ===== BUILD INVOICE ITEMS (products + freight + insurance) =====
     const invoiceItems = [];
 
-    // 1. Product items
     (proforma.items || []).forEach(item => {
       const quantity = item.quantity || 1;
       const sellingPrice = item.sellingPrice || item.rate || 0;
@@ -745,7 +1131,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     });
 
-    // 2. Freight as line item
     const freightAmt = parseFloat(proforma.freight) || 0;
     const freightTaxRate = parseFloat(proforma.freightTaxRate) || 18;
     const freightQty = parseInt(proforma.freightQty) || 1;
@@ -771,7 +1156,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
-    // 3. Insurance as line item
     const insuranceAmt = parseFloat(proforma.insurance) || 0;
     const insuranceTaxRate = parseFloat(proforma.insuranceTaxRate) || 18;
     const insuranceQty = parseInt(proforma.insuranceQty) || 1;
@@ -799,7 +1183,6 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
 
-    // Prefer exact proforma totals so Invoice PDF matches Proforma PDF
     const finalSubtotal = Number(proforma.subtotal) || 0;
     const finalTax = Number(proforma.tax) || 0;
     const finalTotal = Number(proforma.total) || 0;
@@ -831,7 +1214,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       notes: proforma.notes || 'Thanks for your business.',
       terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
 
-      // Explicit freight / insurance metadata
       freight: freightAmt,
       freightTaxRate,
       freightQty,
@@ -840,15 +1222,15 @@ exports.convertProformaToInvoice = async (req, res) => {
       insuranceTaxRate,
       insuranceQty,
       insuranceTax: (insuranceAmt * insuranceTaxRate) / 100,
-      // ===== SHIPPING FIELDS (only for Invoice) =====
-  salesPerson: proforma.salesPerson || lead.assignedToName || '',
-  channel: proforma.channel || '',
-  placeOfReceiptOfContainer: proforma.placeOfReceiptOfContainer || '',
-  incoterms: proforma.incoterms || '',
-  wayRoute: proforma.wayRoute || '',
-  sgsNo: proforma.sgsNo || '',
-  approxShipperCarton: proforma.approxShipperCarton || '',
-  shipperCartonSize: proforma.shipperCartonSize || '',
+
+      salesPerson: proforma.salesPerson || lead.assignedToName || '',
+      channel: proforma.channel || '',
+      placeOfReceiptOfContainer: proforma.placeOfReceiptOfContainer || '',
+      incoterms: proforma.incoterms || '',
+      wayRoute: proforma.wayRoute || '',
+      sgsNo: proforma.sgsNo || '',
+      approxShipperCarton: proforma.approxShipperCarton || '',
+      shipperCartonSize: proforma.shipperCartonSize || '',
 
       portOfLoading: proforma.portOfLoading || '',
       portOfDischarge: proforma.portOfDischarge || '',
@@ -870,6 +1252,13 @@ exports.convertProformaToInvoice = async (req, res) => {
       totalValue,
       totalCost
     };
+
+    // ===== DEDUCT STOCK FROM RESERVATION =====
+    try {
+      await deductStockFromReservation(proforma.items || []);
+    } catch (err) {
+      console.error('Stock deduction on convert failed:', err);
+    }
 
     const invoice = new Invoice(invoiceData);
 
@@ -1022,7 +1411,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 };
 
 // ============================================
-// ✅ DELETE PROFORMA
+// ✅ DELETE PROFORMA (with Stock Release)
 // ============================================
 exports.deleteProforma = async (req, res) => {
   try {
@@ -1041,10 +1430,15 @@ exports.deleteProforma = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    const proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
-    
-    if (proformaIndex === -1) {
+    // Prefer latest revision
+    let targetIndex = lead.proformas.findIndex(p => p.number === proformaNumber && p.isLatest !== false);
+    if (targetIndex === -1) {
+      targetIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
+    }
+
+    if (targetIndex === -1) {
       if (lead.proforma && lead.proforma.number === proformaNumber) {
+        await releaseStockForItems(lead.proforma.items || []);
         lead.proforma = null;
         if (lead.proformas.length === 0) {
           lead.status = 'qualified';
@@ -1062,22 +1456,33 @@ exports.deleteProforma = async (req, res) => {
       });
     }
 
-    if (lead.proformas[proformaIndex].convertedToInvoice) {
+    const proformaToDelete = lead.proformas[targetIndex];
+
+    if (proformaToDelete.convertedToInvoice) {
       return res.status(400).json({
         success: false,
-        message: `Cannot delete proforma ${proformaNumber} as it has been converted to invoice ${lead.proformas[proformaIndex].invoiceNumber}`
+        message: `Cannot delete proforma ${proformaNumber} as it has been converted to invoice ${proformaToDelete.invoiceNumber}`
       });
     }
 
-    lead.proformas.splice(proformaIndex, 1);
+    // ===== RELEASE STOCK =====
+    await releaseStockForItems(proformaToDelete.items || []);
+
+    lead.proformas.splice(targetIndex, 1);
 
     if (lead.proformas.length === 0) {
       lead.status = 'qualified';
       lead.proforma = null;
     } else {
-      lead.proforma = lead.proformas[lead.proformas.length - 1];
+      // Set latest remaining version as current
+      const remainingLatest = lead.proformas.filter(p => p.isLatest !== false);
+      lead.proforma = remainingLatest.length
+        ? remainingLatest[remainingLatest.length - 1]
+        : lead.proformas[lead.proformas.length - 1];
     }
 
+    lead.markModified('proformas');
+    lead.markModified('proforma');
     await lead.save();
 
     res.json({
