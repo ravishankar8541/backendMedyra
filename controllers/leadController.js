@@ -9,61 +9,179 @@ const Invoice = require('../models/Invoice');
 const isValidObjectId = (id) => id && mongoose.Types.ObjectId.isValid(id);
 
 // ============================================
-// ✅ DEDUCT STOCK ONLY ON INVOICE CONVERSION
+// ✅ CHECK STOCK (Live - Reserved) — HARD BLOCK
+// ============================================
+const checkStockAvailability = async (items = []) => {
+  const shortages = [];
+
+  for (const item of items) {
+    if (!item.productId || !isValidObjectId(item.productId)) continue;
+
+    const qty = parseInt(item.quantity) || 0;
+    if (qty <= 0) continue;
+
+    const product = await Product.findById(item.productId);
+    if (!product) {
+      shortages.push({
+        productName: item.productName || 'Unknown',
+        batch: item.batch || '-',
+        required: qty,
+        available: 0,
+        live: 0,
+        reserved: 0,
+        message: 'Product not found in inventory'
+      });
+      continue;
+    }
+
+    if (product.productType === 'batch') {
+      let available = 0;
+      let live = 0;
+      let reserved = 0;
+
+      if (item.batch && item.batch !== 'NEW_BATCH') {
+        const matching = (product.batches || []).filter(
+          (b) => b.batchNumber === item.batch
+        );
+        matching.forEach((b) => {
+          const q = Number(b.quantity) || 0;
+          const r = Number(b.reservedQuantity) || 0;
+          live += q;
+          reserved += r;
+          available += Math.max(0, q - r);
+        });
+      } else {
+        (product.batches || []).forEach((b) => {
+          const q = Number(b.quantity) || 0;
+          const r = Number(b.reservedQuantity) || 0;
+          live += q;
+          reserved += r;
+          available += Math.max(0, q - r);
+        });
+      }
+
+      if (available < qty) {
+        shortages.push({
+          productName: product.name || item.productName,
+          batch: item.batch || 'Any',
+          required: qty,
+          available,
+          live,
+          reserved,
+          message: `Only ${available} available (Live: ${live}, Reserved: ${reserved})`
+        });
+      }
+    } else {
+      const live = Number(product.stock) || 0;
+      const reserved = Number(product.reservedStock) || 0;
+      const available = Math.max(0, live - reserved);
+
+      if (available < qty) {
+        shortages.push({
+          productName: product.name || item.productName,
+          batch: '-',
+          required: qty,
+          available,
+          live,
+          reserved,
+          message: `Only ${available} available (Live: ${live}, Reserved: ${reserved})`
+        });
+      }
+    }
+  }
+
+  return {
+    ok: shortages.length === 0,
+    shortages
+  };
+};
+
+// ============================================
+// ✅ DEDUCT STOCK (Available = Live - Reserved)
 // ============================================
 const deductStockForItems = async (items = []) => {
   for (const item of items) {
     if (!item.productId || !isValidObjectId(item.productId) || !item.quantity) continue;
 
-    try {
-      const product = await Product.findById(item.productId);
-      if (!product) continue;
+    const product = await Product.findById(item.productId);
+    if (!product) continue;
 
-      let qty = parseInt(item.quantity) || 0;
-      if (qty <= 0) continue;
+    let qty = parseInt(item.quantity) || 0;
+    if (qty <= 0) continue;
 
-      if (product.productType === 'batch') {
-        let remaining = qty;
+    if (product.productType === 'batch') {
+      let remaining = qty;
 
-        // 1. Pehle selected batch se stock deduct karo
-        if (item.batch && item.batch !== 'NEW_BATCH') {
-          const matchingBatches = (product.batches || []).filter(
-            (b) => b.batchNumber === item.batch
+      // 1. Selected batch se pehle
+      if (item.batch && item.batch !== 'NEW_BATCH') {
+        const matchingBatches = (product.batches || []).filter(
+          (b) => b.batchNumber === item.batch
+        );
+        for (const batch of matchingBatches) {
+          if (remaining <= 0) break;
+          const available = Math.max(
+            0,
+            (batch.quantity || 0) - (batch.reservedQuantity || 0)
           );
-          for (const batch of matchingBatches) {
-            if (remaining <= 0) break;
-            const currentQty = batch.quantity || 0;
-            const take = Math.min(currentQty, remaining);
-            batch.quantity = Math.max(0, currentQty - take);
-            remaining -= take;
-          }
+          const take = Math.min(available, remaining);
+          batch.quantity = Math.max(0, (batch.quantity || 0) - take);
+          remaining -= take;
         }
-
-        // 2. Agar bacha ho toh baaki batches se lo (FEFO)
-        if (remaining > 0) {
-          const sortedBatches = (product.batches || [])
-            .filter((b) => (b.quantity || 0) > 0)
-            .sort((a, b) => new Date(a.expDate || '9999-12-31') - new Date(b.expDate || '9999-12-31'));
-
-          for (const batch of sortedBatches) {
-            if (remaining <= 0) break;
-            const currentQty = batch.quantity || 0;
-            const take = Math.min(currentQty, remaining);
-            batch.quantity = Math.max(0, currentQty - take);
-            remaining -= take;
-          }
-        }
-
-        product.stock = (product.batches || []).reduce((sum, b) => sum + (b.quantity || 0), 0);
-      } else {
-        // Non-batch product
-        product.stock = Math.max(0, (product.stock || 0) - qty);
       }
 
-      await product.save();
-    } catch (err) {
-      console.error(`Stock deduction error for product ${item.productId}:`, err);
+      // 2. Baaki batches FEFO
+      if (remaining > 0) {
+        const sortedBatches = (product.batches || [])
+          .filter(
+            (b) =>
+              Math.max(0, (b.quantity || 0) - (b.reservedQuantity || 0)) > 0
+          )
+          .sort(
+            (a, b) =>
+              new Date(a.expDate || '9999-12-31') -
+              new Date(b.expDate || '9999-12-31')
+          );
+
+        for (const batch of sortedBatches) {
+          if (remaining <= 0) break;
+          const available = Math.max(
+            0,
+            (batch.quantity || 0) - (batch.reservedQuantity || 0)
+          );
+          const take = Math.min(available, remaining);
+          batch.quantity = Math.max(0, (batch.quantity || 0) - take);
+          remaining -= take;
+        }
+      }
+
+      if (remaining > 0) {
+        throw new Error(
+          `Insufficient stock for ${product.name}. Still need ${remaining} more units.`
+        );
+      }
+
+      product.stock = (product.batches || []).reduce(
+        (sum, b) => sum + (b.quantity || 0),
+        0
+      );
+      product.reservedStock = (product.batches || []).reduce(
+        (sum, b) => sum + (b.reservedQuantity || 0),
+        0
+      );
+    } else {
+      const available = Math.max(
+        0,
+        (product.stock || 0) - (product.reservedStock || 0)
+      );
+      if (available < qty) {
+        throw new Error(
+          `Insufficient stock for ${product.name}. Available: ${available}, Required: ${qty}`
+        );
+      }
+      product.stock = Math.max(0, (product.stock || 0) - qty);
     }
+
+    await product.save();
   }
 };
 
@@ -829,7 +947,7 @@ exports.createProformaRevision = async (req, res) => {
 };
 
 // ============================================
-// ✅ CONVERT PROFORMA TO INVOICE
+// ✅ CONVERT PROFORMA TO INVOICE (ACCURATE INCENTIVE & STOCK CALCULATION)
 // ============================================
 exports.convertProformaToInvoice = async (req, res) => {
   try {
@@ -844,7 +962,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       initialPayment = 0,
       paymentMethod = 'advance',
       paymentReference = '',
-      paymentNotes = ''
+      paymentNotes = '',
+      items: customItems = []
     } = req.body;
 
     let proforma = null;
@@ -855,9 +974,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       if (proformaIndex === -1) {
         proformaIndex = lead.proformas.findIndex(p => p.number === proformaNumber);
       }
-      if (proformaIndex !== -1) {
-        proforma = lead.proformas[proformaIndex];
-      }
+      if (proformaIndex !== -1) proforma = lead.proformas[proformaIndex];
       if (!proforma && lead.proforma && lead.proforma.number === proformaNumber) {
         proforma = lead.proforma;
         proformaIndex = -2;
@@ -885,69 +1002,66 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
-    const existingInvoice = await Invoice.findOne({ proformaNumber: proforma.number });
-
-    if (existingInvoice && !force) {
-      return res.status(409).json({
-        success: false,
-        message: `⚠️ Invoice already exists for proforma ${proforma.number}`,
-        canForce: true,
-        existingInvoice: {
-          number: existingInvoice.invoiceNumber,
-          customer: existingInvoice.customer?.name || 'Unknown',
-          total: existingInvoice.total
-        },
-        proformaNumber: proforma.number
-      });
-    }
-
-    if (existingInvoice && force) {
-      if (existingInvoice.assignedTo && existingInvoice.incentive > 0) {
-        try {
-          const salesman = await User.findById(existingInvoice.assignedTo);
-          if (salesman) {
-            const historyIndex = (salesman.incentiveHistory || []).findIndex(
-              h => h.invoiceNumber === existingInvoice.invoiceNumber
-            );
-            if (historyIndex !== -1) {
-              salesman.incentiveHistory.splice(historyIndex, 1);
-            }
-            salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - (existingInvoice.incentive || 0));
-            salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - (existingInvoice.totalValue || 0));
-            salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
-            salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - (existingInvoice.profit || 0));
-            await salesman.save();
-          }
-        } catch (err) {
-          console.error('Error reversing incentive:', err);
-        }
-      }
-
-      await existingInvoice.deleteOne();
-
-      if (proformaIndex >= 0 && proformaIndex < lead.proformas.length) {
-        lead.proformas[proformaIndex].convertedToInvoice = false;
-        lead.proformas[proformaIndex].invoiceNumber = '';
-        lead.proformas[proformaIndex].conversionDate = null;
-      } else if (proformaIndex === -2 && lead.proforma) {
-        lead.proforma.convertedToInvoice = false;
-        lead.proforma.invoiceNumber = '';
-        lead.proforma.conversionDate = null;
-      }
-
-      await lead.save();
-    }
-
     if (proforma.convertedToInvoice && !force) {
       return res.status(409).json({
         success: false,
-        message: `⚠️ Proforma ${proforma.number} is already converted to invoice ${proforma.invoiceNumber}`,
-        existingInvoice: proforma.invoiceNumber,
-        proformaNumber: proforma.number
+        message: `⚠️ Proforma ${proforma.number} is already converted to invoice ${proforma.invoiceNumber}`
       });
     }
 
-    // ===== Generate Invoice Number =====
+    // Source items selection
+    const sourceItems = (customItems && customItems.length > 0) ? customItems : (proforma.items || []);
+
+    // 🔒 Validation: Invoice qty cannot exceed Proforma qty
+    const itemsToDeduct = [];
+    for (const item of sourceItems) {
+      if (item.freight) continue;
+      const originalItem = (proforma.items || []).find(pi => 
+        (pi.productId && String(pi.productId) === String(item.productId)) || 
+        pi.productName === item.description
+      );
+
+      const maxAllowed = originalItem ? originalItem.quantity : item.quantity;
+      if (item.quantity > maxAllowed) {
+        return res.status(400).json({
+          success: false,
+          message: `⚠️ Quantity for "${item.description || item.productName}" cannot exceed proforma quantity (${maxAllowed}).`
+        });
+      }
+
+      itemsToDeduct.push({
+        productId: item.productId,
+        productName: item.description || item.productName,
+        quantity: parseInt(item.quantity) || 0,
+        batch: item.batch
+      });
+    }
+
+    // 🔒 Validation: Stock availability
+    const stockCheck = await checkStockAvailability(itemsToDeduct);
+    if (!stockCheck.ok) {
+      const details = stockCheck.shortages
+        .map((s) => `• ${s.productName} [Batch: ${s.batch}] — Required: ${s.required}, Available: ${s.available}`)
+        .join('\n');
+
+      return res.status(400).json({
+        success: false,
+        message: `⚠️ Insufficient stock in inventory:\n\n${details}`,
+        shortages: stockCheck.shortages
+      });
+    }
+
+    // Deduct stock safely
+    try {
+      await deductStockForItems(itemsToDeduct);
+    } catch (stockErr) {
+      return res.status(400).json({
+        success: false,
+        message: `⚠️ Stock deduction failed: ${stockErr.message}`
+      });
+    }
+
+    // Generate Invoice Number
     const year = new Date().getFullYear();
     const lastInvoice = await Invoice.findOne({
       invoiceNumber: { $regex: `MPDMS${year}/` }
@@ -970,37 +1084,58 @@ exports.convertProformaToInvoice = async (req, res) => {
       existingWithNumber = await Invoice.findOne({ invoiceNumber });
     }
 
-    // ===== Incentive calculation =====
     let totalIncentive = 0;
     let totalProfit = 0;
     let totalValue = 0;
     let totalCost = 0;
-    let overallProfitPercentage = 0;
+    let subtotal = 0;
+    let tax = 0;
 
     const invoiceItems = [];
 
-    (proforma.items || []).forEach(item => {
-      const quantity = item.quantity || 1;
-      const sellingPrice = item.sellingPrice || item.rate || 0;
-      const costPrice = item.costPrice || 0;
+    for (const item of sourceItems) {
+      const qty = parseInt(item.quantity) || 1;
+      const rate = parseFloat(item.rate) || 0;
+      const taxRate = parseFloat(item.taxRate) || 0;
+      const amount = qty * rate;
 
-      const totalValueItem = sellingPrice * quantity;
-      const totalCostItem = costPrice * quantity;
+      // ✅ Fetch costPrice from item, proforma item, or product DB
+      let costPrice = parseFloat(item.costPrice) || 0;
+      if (costPrice <= 0) {
+        const originalPfItem = (proforma.items || []).find(pi => 
+          (pi.productId && String(pi.productId) === String(item.productId)) ||
+          pi.productName === (item.description || item.productName)
+        );
+        if (originalPfItem && originalPfItem.costPrice > 0) {
+          costPrice = parseFloat(originalPfItem.costPrice);
+        } else if (item.productId) {
+          const prod = await Product.findById(item.productId);
+          if (prod) costPrice = parseFloat(prod.pricing?.costPrice) || 0;
+        }
+      }
+
+      subtotal += amount;
+      tax += (amount * taxRate) / 100;
+
+      const totalValueItem = rate * qty;
+      const totalCostItem = costPrice * qty;
       const profitAmountItem = totalValueItem - totalCostItem;
       const profitPercentageItem = totalCostItem > 0 ? (profitAmountItem / totalCostItem) * 100 : 0;
       const incentive = calculateIncentive(totalValueItem, profitPercentageItem);
 
-      totalIncentive += incentive;
-      totalProfit += profitAmountItem;
-      totalValue += totalValueItem;
-      totalCost += totalCostItem;
+      if (!item.freight) {
+        totalIncentive += incentive;
+        totalProfit += profitAmountItem;
+        totalValue += totalValueItem;
+        totalCost += totalCostItem;
+      }
 
       invoiceItems.push({
-        description: item.productName || item.description || 'Product',
-        quantity: item.quantity,
-        rate: item.rate || item.sellingPrice || 0,
-        taxRate: item.taxRate || 18,
-        amount: item.total || (item.quantity * (item.rate || item.sellingPrice || 0)),
+        description: item.description || item.productName || 'Product',
+        quantity: qty,
+        rate,
+        taxRate,
+        amount,
         batch: item.batch || '',
         hsCode: item.hsCode || '',
         mfgDate: item.mfgDate || '',
@@ -1008,71 +1143,17 @@ exports.convertProformaToInvoice = async (req, res) => {
         unit: item.unit || 'Vial',
         countryOfOrigin: item.countryOfOrigin || 'India',
         costPrice,
-        sellingPrice,
+        sellingPrice: rate,
         profitAmount: profitAmountItem,
         profitPercentage: profitPercentageItem,
         incentive,
-        freight: false
-      });
-    });
-
-    const freightAmt = parseFloat(proforma.freight) || 0;
-    const freightTaxRate = parseFloat(proforma.freightTaxRate) || 18;
-    const freightQty = parseInt(proforma.freightQty) || 1;
-    if (freightAmt > 0) {
-      invoiceItems.push({
-        description: 'Freight / Shipping Charges',
-        quantity: freightQty,
-        rate: freightAmt,
-        taxRate: freightTaxRate,
-        amount: freightAmt * freightQty,
-        batch: '-',
-        hsCode: '',
-        mfgDate: '',
-        expiryDate: '',
-        unit: 'PCS',
-        countryOfOrigin: 'India',
-        costPrice: 0,
-        sellingPrice: freightAmt,
-        profitAmount: 0,
-        profitPercentage: 0,
-        incentive: 0,
-        freight: true
+        freight: !!item.freight
       });
     }
 
-    const insuranceAmt = parseFloat(proforma.insurance) || 0;
-    const insuranceTaxRate = parseFloat(proforma.insuranceTaxRate) || 18;
-    const insuranceQty = parseInt(proforma.insuranceQty) || 1;
-    if (insuranceAmt > 0) {
-      invoiceItems.push({
-        description: 'Insurance Charges',
-        quantity: insuranceQty,
-        rate: insuranceAmt,
-        taxRate: insuranceTaxRate,
-        amount: insuranceAmt * insuranceQty,
-        batch: '-',
-        hsCode: '',
-        mfgDate: '',
-        expiryDate: '',
-        unit: 'PCS',
-        countryOfOrigin: 'India',
-        costPrice: 0,
-        sellingPrice: insuranceAmt,
-        profitAmount: 0,
-        profitPercentage: 0,
-        incentive: 0,
-        freight: false
-      });
-    }
-
-    overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
-
-    const finalSubtotal = Number(proforma.subtotal) || 0;
-    const finalTax = Number(proforma.tax) || 0;
-    const finalTotal = Number(proforma.total) || 0;
-    const finalRounding = proforma.rounding != null ? Number(proforma.rounding) : 0;
-
+    const grandTotal = Math.round(subtotal + tax);
+    const rounding = Number((grandTotal - (subtotal + tax)).toFixed(2));
+    const overallProfitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
     const finalCurrency = proforma.currency || lead.currency || (proforma.type === 'international' ? 'USD' : 'INR');
 
     const invoiceData = {
@@ -1084,7 +1165,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       paymentTerms: proforma.paymentTerms || '100% Advance',
       currency: finalCurrency,
       exchangeRate: parseFloat(proforma.exchangeRate) || 1,
-
       customer: {
         name: lead.name,
         phone: lead.phone,
@@ -1096,40 +1176,13 @@ exports.convertProformaToInvoice = async (req, res) => {
         stateCode: lead.stateCode || ''
       },
       items: invoiceItems,
-      subtotal: finalSubtotal,
-      tax: finalTax,
-      total: finalTotal,
-      rounding: finalRounding,
+      subtotal: Math.round(subtotal * 100) / 100,
+      tax: Math.round(tax * 100) / 100,
+      total: grandTotal,
+      rounding,
       totalInWords: proforma.totalInWords || '',
       notes: proforma.notes || 'Thanks for your business.',
       terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
-
-      freight: freightAmt,
-      freightTaxRate,
-      freightQty,
-      freightTax: (freightAmt * freightTaxRate) / 100,
-      insurance: insuranceAmt,
-      insuranceTaxRate,
-      insuranceQty,
-      insuranceTax: (insuranceAmt * insuranceTaxRate) / 100,
-
-      salesPerson: proforma.salesPerson || lead.assignedToName || '',
-      channel: proforma.channel || '',
-      placeOfReceiptOfContainer: proforma.placeOfReceiptOfContainer || '',
-      incoterms: proforma.incoterms || '',
-      wayRoute: proforma.wayRoute || '',
-      sgsNo: proforma.sgsNo || '',
-      approxShipperCarton: proforma.approxShipperCarton || '',
-      shipperCartonSize: proforma.shipperCartonSize || '',
-
-      portOfLoading: proforma.portOfLoading || '',
-      portOfDischarge: proforma.portOfDischarge || '',
-      destinationCountry: proforma.destinationCountry || '',
-      grossWeight: proforma.grossWeight || '',
-      netWeight: proforma.netWeight || '',
-      volumetricWeight: proforma.volumetricWeight || '',
-      countryOfOriginGoods: proforma.countryOfOriginGoods || 'India',
-      totalBoxes: proforma.totalBoxes || '',
       proformaNumber: proforma.number,
       leadId: lead._id,
       status: 'draft',
@@ -1143,12 +1196,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       totalCost
     };
 
-    // ===== 🚀 DEDUCT STOCK DIRECTLY ON INVOICE CONVERSION =====
-    await deductStockForItems(proforma.items || []);
-
     const invoice = new Invoice(invoiceData);
 
-    // ===== INITIAL PAYMENT =====
     const initPay = parseFloat(initialPayment) || 0;
     if (initPay > 0) {
       invoice.payments = [{
@@ -1162,13 +1211,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       invoice.paidAmount = Math.round(initPay * 100) / 100;
       invoice.dueAmount = Math.max(0, Math.round((invoice.total - initPay) * 100) / 100);
       invoice.paymentStatus = initPay >= invoice.total ? 'paid' : 'partially_paid';
-
-      if (initPay >= invoice.total) {
-        invoice.status = 'paid';
-        invoice.paymentDate = new Date();
-      } else {
-        invoice.status = 'sent';
-      }
+      invoice.status = initPay >= invoice.total ? 'paid' : 'sent';
+      if (initPay >= invoice.total) invoice.paymentDate = new Date();
     } else {
       invoice.paidAmount = 0;
       invoice.dueAmount = invoice.total;
@@ -1177,8 +1221,8 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     await invoice.save();
 
+    // ✅ SAVE INCENTIVE DIRECTLY ON PROFORMA & LEAD
     lead._skipAutoCalculate = true;
-
     if (proformaIndex >= 0) {
       lead.proformas[proformaIndex].incentive = totalIncentive;
       lead.proformas[proformaIndex].profit = totalProfit;
@@ -1205,6 +1249,10 @@ exports.convertProformaToInvoice = async (req, res) => {
       }
     });
 
+    if (totalLeadIncentive === 0) totalLeadIncentive = totalIncentive;
+    if (totalLeadProfit === 0) totalLeadProfit = totalProfit;
+    if (totalLeadValue === 0) totalLeadValue = totalValue;
+
     lead.totalIncentive = totalLeadIncentive;
     lead.totalProfit = totalLeadProfit;
     lead.totalValue = totalLeadValue;
@@ -1212,84 +1260,38 @@ exports.convertProformaToInvoice = async (req, res) => {
     lead.profit = totalLeadProfit;
     lead.value = totalLeadValue;
 
-    if (lead.status !== 'converted') {
-      lead.status = 'converted';
-      lead.conversionDate = new Date();
-      lead.statusHistory = lead.statusHistory || [];
-      lead.statusHistory.push({
-        status: 'converted',
-        date: new Date(),
-        notes: `✅ Converted proforma ${proforma.number} to invoice ${invoiceNumber}`,
-        updatedBy: req.user?.id || req.user?._id || null
-      });
-    }
-
+    lead.status = 'converted';
+    lead.conversionDate = new Date();
+    lead.markModified('proformas');
+    lead.markModified('proforma');
     await lead.save();
-    await lead.populate('assignedTo', 'name email');
 
-    // Salesman Incentive
+    // ✅ Credit incentive to salesman
     if (lead.assignedTo && totalIncentive > 0) {
       try {
         const salesman = await User.findById(lead.assignedTo._id || lead.assignedTo);
         if (salesman) {
-          const existingHistory = (salesman.incentiveHistory || []).find(
-            h => h.invoiceNumber === invoiceNumber
-          );
-          if (!existingHistory) {
-            salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
-            salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
-            salesman.totalConversions = (salesman.totalConversions || 0) + 1;
-            salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
-
-            if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
-            salesman.incentiveHistory.push({
-              leadId: lead._id,
-              leadName: lead.name,
-              proformaNumber: proforma.number,
-              invoiceNumber: invoiceNumber,
-              amount: totalIncentive,
-              value: totalValue,
-              profit: totalProfit,
-              profitPercentage: overallProfitPercentage,
-              date: new Date(),
-              status: 'credited'
-            });
-
-            await salesman.save();
-          }
+          salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
+          salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
+          salesman.totalConversions = (salesman.totalConversions || 0) + 1;
+          salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
+          await salesman.save();
         }
-      } catch (err) {
-        console.error('Error updating salesman incentive:', err);
+      } catch (salesErr) {
+        console.error('Error updating salesman incentive:', salesErr);
       }
     }
 
-    await invoice.populate('createdBy', 'name');
-
     res.status(201).json({
       success: true,
-      data: {
-        invoice,
-        lead: lead,
-        proformaIncentive: {
-          amount: totalIncentive,
-          profit: totalProfit,
-          value: totalValue,
-          profitPercentage: overallProfitPercentage,
-          proformaNumber: proforma.number
-        }
-      },
-      message: `✅ Invoice ${invoiceNumber} created from proforma ${proforma.number} | Incentive: ₹${totalIncentive.toFixed(2)}`
+      data: { invoice, lead, incentive: totalIncentive },
+      message: `✅ Invoice ${invoiceNumber} created successfully! Incentive: ₹${totalIncentive.toFixed(2)}`
     });
-
   } catch (error) {
-    console.error('Convert proforma to invoice error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error during conversion'
-    });
+    console.error('Convert proforma error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
-
 // ============================================
 // ✅ DELETE PROFORMA (CLEAN & DIRECT DELETION)
 // ============================================

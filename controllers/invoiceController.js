@@ -1,7 +1,8 @@
-// controllers/invoiceController.js - FULL UPDATED VERSION WITH INSTALLMENTS
+// controllers/invoiceController.js
 const Invoice = require('../models/Invoice');
 const Lead = require('../models/Lead');
 const User = require('../models/User');
+const Product = require('../models/Product');
 
 const calculateIncentive = (revenue, profitPercentage) => {
   if (profitPercentage >= 35) {
@@ -51,13 +52,12 @@ exports.addInvoicePayment = async (req, res) => {
       method: method || 'bank_transfer',
       reference: reference || '',
       notes: notes || '',
-      receivedBy: req.user.id
+      receivedBy: req.user?.id
     };
 
     if (!invoice.payments) invoice.payments = [];
     invoice.payments.push(newPayment);
 
-    // Recalculate totals
     let totalPaid = 0;
     invoice.payments.forEach(p => {
       totalPaid += p.amount || 0;
@@ -76,7 +76,6 @@ exports.addInvoicePayment = async (req, res) => {
 
     await invoice.save();
 
-    // ✅ Update lead payment status if linked
     if (invoice.leadId) {
       try {
         const lead = await Lead.findById(invoice.leadId);
@@ -117,12 +116,223 @@ exports.addInvoicePayment = async (req, res) => {
 };
 
 // ============================================
+// ✅ UPDATE INVOICE ITEMS / QUANTITY (FIXED BATCH LOTS STOCK CHECK)
+// ============================================
+exports.updateInvoiceItems = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { items: newItems } = req.body;
+
+    if (!newItems || !Array.isArray(newItems) || newItems.length === 0) {
+      return res.status(400).json({ success: false, message: 'Items are required' });
+    }
+
+    const invoice = await Invoice.findById(id);
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    let proformaItems = [];
+    if (invoice.leadId && invoice.proformaNumber) {
+      const lead = await Lead.findById(invoice.leadId);
+      if (lead) {
+        const pf = (lead.proformas || []).find(p => p.number === invoice.proformaNumber) || 
+                   (lead.proforma?.number === invoice.proformaNumber ? lead.proforma : null);
+        if (pf && pf.items) proformaItems = pf.items;
+      }
+    }
+
+    // Process each item & adjust stock difference
+    for (const newItem of newItems) {
+      if (newItem.freight) continue;
+
+      const cleanItemName = (newItem.description || newItem.productName || '').trim().toLowerCase();
+
+      const oldItem = invoice.items.find(i => 
+        (i.description || '').trim().toLowerCase() === cleanItemName
+      );
+
+      const oldQty = oldItem ? Number(oldItem.quantity) || 0 : 0;
+      const targetQty = Number(newItem.quantity) || 0;
+      const diff = targetQty - oldQty; // e.g. 2 - 1 = +1 extra required
+
+      // 1. Proforma max limit check
+      const originalPfItem = proformaItems.find(pi => 
+        (pi.productName || pi.description || '').trim().toLowerCase() === cleanItemName
+      );
+      if (originalPfItem) {
+        const maxPfQty = Number(originalPfItem.quantity) || 0;
+        if (targetQty > maxPfQty) {
+          return res.status(400).json({
+            success: false,
+            message: `⚠️ Quantity for "${newItem.description}" cannot exceed proforma limit (${maxPfQty}).`
+          });
+        }
+      }
+
+      // 2. Stock check across all matching batch lots
+      if (diff !== 0) {
+        let product = null;
+        if (newItem.productId) {
+          product = await Product.findById(newItem.productId);
+        }
+        if (!product) {
+          product = await Product.findOne({
+            name: new RegExp(`^${(newItem.description || newItem.productName || '').trim()}$`, 'i')
+          });
+        }
+
+        if (product) {
+          if (product.productType === 'batch') {
+            const batchName = (newItem.batch || '').trim().toLowerCase();
+            
+            let matchingBatches = (product.batches || []).filter(
+              b => (b.batchNumber || '').trim().toLowerCase() === batchName
+            );
+
+            if (matchingBatches.length === 0) {
+              matchingBatches = product.batches || [];
+            }
+
+            // Calculate total available across all matching lots
+            const totalAvailable = matchingBatches.reduce(
+              (sum, b) => sum + Math.max(0, (Number(b.quantity) || 0) - (Number(b.reservedQuantity) || 0)),
+              0
+            );
+
+            if (diff > 0) {
+              if (totalAvailable < diff) {
+                return res.status(400).json({
+                  success: false,
+                  message: `⚠️ Insufficient stock for ${product.name}. Available: ${totalAvailable}, Extra required: ${diff}`
+                });
+              }
+
+              // Deduct from lots that have available stock
+              let remainingToDeduct = diff;
+              for (const batch of matchingBatches) {
+                if (remainingToDeduct <= 0) break;
+                const availInBatch = Math.max(0, (Number(batch.quantity) || 0) - (Number(batch.reservedQuantity) || 0));
+                const take = Math.min(availInBatch, remainingToDeduct);
+                batch.quantity = Math.max(0, (Number(batch.quantity) || 0) - take);
+                remainingToDeduct -= take;
+              }
+            } else if (diff < 0) {
+              // Add back stock to the latest lot
+              const restoreQty = Math.abs(diff);
+              if (matchingBatches.length > 0) {
+                matchingBatches[matchingBatches.length - 1].quantity = 
+                  (Number(matchingBatches[matchingBatches.length - 1].quantity) || 0) + restoreQty;
+              }
+            }
+
+            product.stock = (product.batches || []).reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+            product.reservedStock = (product.batches || []).reduce((sum, b) => sum + (Number(b.reservedQuantity) || 0), 0);
+          } else {
+            const available = Math.max(0, (Number(product.stock) || 0) - (Number(product.reservedStock) || 0));
+            if (diff > 0 && available < diff) {
+              return res.status(400).json({
+                success: false,
+                message: `⚠️ Insufficient stock for ${product.name}. Available: ${available}, Extra required: ${diff}`
+              });
+            }
+            product.stock = Math.max(0, (Number(product.stock) || 0) - diff);
+          }
+
+          await product.save();
+        }
+      }
+    }
+
+    // Recalculate invoice totals
+    let subtotal = 0;
+    let tax = 0;
+    let totalIncentive = 0;
+    let totalProfit = 0;
+    let totalValue = 0;
+    let totalCost = 0;
+
+    const updatedInvoiceItems = newItems.map(item => {
+      const qty = Number(item.quantity) || 1;
+      const rate = Number(item.rate) || 0;
+      const taxRate = Number(item.taxRate) || 0;
+      const costPrice = Number(item.costPrice) || 0;
+      const amount = qty * rate;
+
+      subtotal += amount;
+      tax += (amount * taxRate) / 100;
+
+      const totalVal = rate * qty;
+      const totalCst = costPrice * qty;
+      const profitAmt = totalVal - totalCst;
+      const profitPct = totalCst > 0 ? (profitAmt / totalCst) * 100 : 0;
+      const incentive = calculateIncentive(totalVal, profitPct);
+
+      if (!item.freight) {
+        totalIncentive += incentive;
+        totalProfit += profitAmt;
+        totalValue += totalVal;
+        totalCost += totalCst;
+      }
+
+      return {
+        description: item.description || item.productName || 'Product',
+        quantity: qty,
+        rate,
+        taxRate,
+        amount,
+        batch: item.batch || '',
+        hsCode: item.hsCode || '',
+        mfgDate: item.mfgDate || '',
+        expiryDate: item.expiryDate || '',
+        unit: item.unit || 'Vial',
+        countryOfOrigin: item.countryOfOrigin || 'India',
+        costPrice,
+        sellingPrice: rate,
+        profitAmount: profitAmt,
+        profitPercentage: profitPct,
+        incentive,
+        freight: !!item.freight
+      };
+    });
+
+    const grandTotal = Math.round(subtotal + tax);
+    const rounding = Number((grandTotal - (subtotal + tax)).toFixed(2));
+
+    invoice.items = updatedInvoiceItems;
+    invoice.subtotal = Math.round(subtotal * 100) / 100;
+    invoice.tax = Math.round(tax * 100) / 100;
+    invoice.total = grandTotal;
+    invoice.rounding = rounding;
+    invoice.incentive = totalIncentive;
+    invoice.profit = totalProfit;
+    invoice.totalValue = totalValue;
+    invoice.totalCost = totalCost;
+
+    const paid = Number(invoice.paidAmount) || 0;
+    invoice.dueAmount = Math.max(0, Math.round((grandTotal - paid) * 100) / 100);
+    invoice.paymentStatus = invoice.dueAmount <= 0.01 ? 'paid' : paid > 0 ? 'partially_paid' : 'unpaid';
+
+    await invoice.save();
+
+    res.json({
+      success: true,
+      data: invoice,
+      message: `✅ Invoice quantity updated successfully!`
+    });
+  } catch (error) {
+    console.error('Update invoice items error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// ============================================
 // ✅ CREATE INVOICE
 // ============================================
 exports.createInvoice = async (req, res) => {
   try {
     const invoiceData = req.body;
-    invoiceData.createdBy = req.user.id;
+    invoiceData.createdBy = req.user?.id;
 
     if (!invoiceData.customer || !invoiceData.customer.name) {
       return res.status(400).json({
@@ -172,14 +382,12 @@ exports.createInvoice = async (req, res) => {
     invoiceData.subtotal = subtotal;
     invoiceData.tax = tax;
     invoiceData.total = totalInvoiceAmount;
-    
     invoiceData.incentive = totalIncentive;
     invoiceData.profit = totalProfit;
     invoiceData.totalValue = totalValue;
     invoiceData.totalCost = totalCost;
     invoiceData.profitPercentage = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
     
-    // Handle initial payment
     const initPay = parseFloat(invoiceData.initialPayment) || 0;
     if (initPay > 0) {
       invoiceData.payments = [{
@@ -188,7 +396,7 @@ exports.createInvoice = async (req, res) => {
         method: invoiceData.paymentMethod || 'advance',
         reference: invoiceData.paymentReference || '',
         notes: invoiceData.paymentNotes || 'Advance payment',
-        receivedBy: req.user.id
+        receivedBy: req.user?.id
       }];
       invoiceData.paidAmount = initPay;
       invoiceData.dueAmount = Math.max(0, Math.round((totalInvoiceAmount - initPay) * 100) / 100);
@@ -211,53 +419,13 @@ exports.createInvoice = async (req, res) => {
     const invoice = new Invoice(invoiceData);
     await invoice.save();
 
-    // Credit incentive to salesman
-    if (invoiceData.assignedTo && totalIncentive > 0) {
-      try {
-        const salesman = await User.findById(invoiceData.assignedTo);
-        if (salesman) {
-          salesman.totalIncentiveEarned = (salesman.totalIncentiveEarned || 0) + totalIncentive;
-          salesman.totalSalesValue = (salesman.totalSalesValue || 0) + totalValue;
-          salesman.totalConversions = (salesman.totalConversions || 0) + 1;
-          salesman.totalProfitGenerated = (salesman.totalProfitGenerated || 0) + totalProfit;
-          
-          if (!salesman.incentiveHistory) salesman.incentiveHistory = [];
-          salesman.incentiveHistory.push({
-            leadId: invoiceData.leadId,
-            leadName: invoiceData.customer?.name || 'Unknown',
-            invoiceNumber: invoice.invoiceNumber,
-            amount: totalIncentive,
-            value: totalValue,
-            profit: totalProfit,
-            profitPercentage: totalCost > 0 ? (totalProfit / totalCost) * 100 : 0,
-            date: new Date(),
-            status: 'credited'
-          });
-          
-          await salesman.save();
-        }
-      } catch (err) {
-        console.error('Error updating salesman incentive:', err);
-      }
-    }
-
     res.status(201).json({
       success: true,
-      data: invoice,
-      incentive: {
-        total: totalIncentive,
-        profit: totalProfit,
-        value: totalValue,
-        profitPercentage: totalCost > 0 ? (totalProfit / totalCost) * 100 : 0,
-        salesman: invoiceData.assignedToName || 'Unassigned'
-      }
+      data: invoice
     });
   } catch (error) {
     console.error('Create invoice error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -266,7 +434,7 @@ exports.createInvoice = async (req, res) => {
 // ============================================
 exports.getInvoices = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, type, search } = req.query;
+    const { page = 1, limit = 100, status, type, search } = req.query;
 
     const query = {};
     if (status && status !== 'all') query.status = status;
@@ -300,10 +468,7 @@ exports.getInvoices = async (req, res) => {
     });
   } catch (error) {
     console.error('Get invoices error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -317,22 +482,13 @@ exports.getInvoice = async (req, res) => {
       .populate('assignedTo', 'name email');
 
     if (!invoice) {
-      return res.status(404).json({
-        success: false,
-        message: 'Invoice not found'
-      });
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
-    res.json({
-      success: true,
-      data: invoice
-    });
+    res.json({ success: true, data: invoice });
   } catch (error) {
     console.error('Get invoice error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -345,10 +501,7 @@ exports.updateInvoiceStatus = async (req, res) => {
     const invoice = await Invoice.findById(req.params.id);
 
     if (!invoice) {
-      return res.status(404).json({
-        success: false,
-        message: 'Invoice not found'
-      });
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
     invoice.status = status;
@@ -360,92 +513,25 @@ exports.updateInvoiceStatus = async (req, res) => {
     }
 
     await invoice.save();
-
-    res.json({
-      success: true,
-      data: invoice
-    });
+    res.json({ success: true, data: invoice });
   } catch (error) {
     console.error('Update invoice status error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
-// ============================================
-// ✅ DELETE INVOICE WITH INCENTIVE REVERSAL
-// ============================================
 exports.deleteInvoice = async (req, res) => {
   try {
     const invoice = await Invoice.findById(req.params.id);
 
     if (!invoice) {
-      return res.status(404).json({
-        success: false,
-        message: 'Invoice not found'
-      });
-    }
-
-    const invoiceData = {
-      invoiceNumber: invoice.invoiceNumber,
-      incentive: invoice.incentive || 0,
-      profit: invoice.profit || 0,
-      totalValue: invoice.totalValue || 0,
-      assignedTo: invoice.assignedTo,
-      leadId: invoice.leadId
-    };
-
-    if (invoiceData.assignedTo && invoiceData.incentive > 0) {
-      try {
-        const salesman = await User.findById(invoiceData.assignedTo);
-        if (salesman) {
-          const historyIndex = (salesman.incentiveHistory || []).findIndex(
-            h => h.invoiceNumber === invoiceData.invoiceNumber
-          );
-
-          if (historyIndex !== -1) {
-            salesman.incentiveHistory.splice(historyIndex, 1);
-          }
-          salesman.totalIncentiveEarned = Math.max(0, (salesman.totalIncentiveEarned || 0) - invoiceData.incentive);
-          salesman.totalSalesValue = Math.max(0, (salesman.totalSalesValue || 0) - invoiceData.totalValue);
-          salesman.totalConversions = Math.max(0, (salesman.totalConversions || 0) - 1);
-          salesman.totalProfitGenerated = Math.max(0, (salesman.totalProfitGenerated || 0) - invoiceData.profit);
-          await salesman.save();
-        }
-      } catch (err) {
-        console.error('Error reversing salesman incentive:', err);
-      }
-    }
-
-    if (invoiceData.leadId) {
-      try {
-        const lead = await Lead.findById(invoiceData.leadId);
-        if (lead && lead.status === 'converted') {
-          lead.status = 'proforma_sent';
-          lead.totalIncentive = Math.max(0, (lead.totalIncentive || 0) - invoiceData.incentive);
-          lead.totalProfit = Math.max(0, (lead.totalProfit || 0) - invoiceData.profit);
-          lead.totalValue = Math.max(0, (lead.totalValue || 0) - invoiceData.totalValue);
-          lead.conversionDate = null;
-          await lead.save();
-        }
-      } catch (err) {
-        console.error('Error updating lead on invoice delete:', err);
-      }
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
     await invoice.deleteOne();
-
-    res.json({
-      success: true,
-      message: `✅ Invoice ${invoiceData.invoiceNumber} deleted successfully`
-    });
+    res.json({ success: true, message: `✅ Invoice deleted successfully` });
   } catch (error) {
     console.error('Delete invoice error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
-};
+}; // ← 
