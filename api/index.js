@@ -43,8 +43,8 @@ const unitRoutes = require('../routes/unitRoutes');
 const categoryRoutes = require('../routes/categoryRoutes');
 const goodsReceiptRoutes = require('../routes/goodsReceiptRoutes');
 const subCategoryRoutes = require('../routes/subCategoryRoutes');
-
-
+const vendorPriceListRoutes = require('../routes/vendorPriceListRoutes');
+const clientPriceListRoutes = require('../routes/clientPriceListRoutes');
 const app = express();
 
 // Connect to database
@@ -195,6 +195,8 @@ mountRoute('/api/categories', categoryRoutes, 'Category Routes')
 mountRoute('/api/goods-receipts', goodsReceiptRoutes, 'Goods Receipt Routes');
 mountRoute('/api/purchase-returns', purchaseReturnRoutes, 'Purchase Return Routes');
 mountRoute('/api/subcategories', subCategoryRoutes, 'Sub Category Routes');
+mountRoute('/api/vendor-price-lists', vendorPriceListRoutes, 'Vendor Price Lists');
+mountRoute('/api/client-price-lists', clientPriceListRoutes, 'Client Price Lists');
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
