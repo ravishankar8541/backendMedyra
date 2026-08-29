@@ -1,147 +1,252 @@
 const Package = require('../models/Package');
-const Order = require('../models/Order');
+const mongoose = require('mongoose');
 
-// @desc    Create package
-// @route   POST /api/packages
-// @access  Private
-exports.createPackage = async (req, res) => {
-  try {
-    const packageData = req.body;
-    packageData.createdBy = req.user.id;
-
-    // Get order details if provided
-    if (packageData.order) {
-      const order = await Order.findById(packageData.order);
-      if (order) {
-        packageData.customerName = order.customer.name;
-        packageData.customerPhone = order.customer.phone;
-        packageData.customerAddress = order.customer.address;
-      }
-    }
-
-    const pkg = new Package(packageData);
-    await pkg.save();
-
-    // Update order status
-    if (packageData.order) {
-      await Order.findByIdAndUpdate(packageData.order, {
-        orderStatus: 'packed'
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      data: pkg
-    });
-  } catch (error) {
-    console.error('Create package error:', error);
-    res.status(500).json({ message: 'Server error' });
+// Helper to sanitize product items and prevent CastError on empty strings
+const sanitizeItem = (item) => {
+  if (!item) return item;
+  let prodId = item.productId;
+  if (!prodId || prodId === '' || typeof prodId !== 'string' || prodId.length !== 24 || !mongoose.Types.ObjectId.isValid(prodId)) {
+    prodId = null;
   }
+  return {
+    ...item,
+    productId: prodId
+  };
 };
 
-// @desc    Get all packages
-// @route   GET /api/packages
-// @access  Private
+// ============================================
+// 1. GET ALL PACKAGES
+// ============================================
 exports.getPackages = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, priority, search } = req.query;
-
+    const { search, status, priority, startDate, endDate, limit = 200 } = req.query;
     const query = {};
-    if (status) query.status = status;
-    if (priority) query.priority = priority;
+
+    if (status && status !== 'all') query.status = status;
+    if (priority && priority !== 'all') query.priority = priority;
+
     if (search) {
       query.$or = [
         { orderId: { $regex: search, $options: 'i' } },
-        { customerName: { $regex: search, $options: 'i' } }
+        { customerName: { $regex: search, $options: 'i' } },
+        { invoiceNo: { $regex: search, $options: 'i' } },
+        { 'products.name': { $regex: search, $options: 'i' } },
+        { 'boxes.boxNumber': { $regex: search, $options: 'i' } }
       ];
     }
 
+    if (startDate || endDate) {
+      query.createdDate = {};
+      if (startDate) query.createdDate.$gte = startDate;
+      if (endDate) query.createdDate.$lte = endDate;
+    }
+
     const packages = await Package.find(query)
-      .populate('createdBy', 'name')
+      .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
       .limit(parseInt(limit));
 
-    const total = await Package.countDocuments(query);
+    res.json({ success: true, data: packages });
+  } catch (error) {
+    console.error('getPackages error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// 2. GET SINGLE PACKAGE BY ID
+// ============================================
+exports.getPackageById = async (req, res) => {
+  try {
+    const pkg = await Package.findById(req.params.id).populate('createdBy', 'name email');
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Package not found' });
+    }
+    res.json({ success: true, data: pkg });
+  } catch (error) {
+    console.error('getPackageById error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// 3. CREATE NEW PACKAGE
+// ============================================
+exports.createPackage = async (req, res) => {
+  try {
+    const data = { ...req.body };
+    data.createdBy = req.user?.id || req.user?._id || null;
+
+    if (!data.orderId || !data.customerName || !data.customerAddress) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order ID, Customer Name, and Address are required'
+      });
+    }
+
+    if (!data.createdDate) {
+      data.createdDate = new Date().toISOString().split('T')[0];
+    }
+    if (!data.invoiceDate) {
+      data.invoiceDate = data.createdDate;
+    }
+
+    // Sanitize products array
+    if (data.products && Array.isArray(data.products)) {
+      data.products = data.products.map(sanitizeItem);
+    }
+
+    // Sanitize boxes items array
+    if (data.boxes && Array.isArray(data.boxes)) {
+      data.boxes = data.boxes.map(box => ({
+        ...box,
+        items: (box.items || []).map(sanitizeItem)
+      }));
+    } else {
+      data.boxes = [{
+        boxIndex: 1,
+        boxNumber: '1',
+        totalBoxes: 1,
+        netWeight: data.totalNetWeight || '',
+        grossWeight: data.totalGrossWeight || '',
+        dimension: data.boxDimension || '57*38*39',
+        items: data.products || []
+      }];
+    }
+
+    const newPackage = new Package(data);
+    await newPackage.save();
+
+    res.status(201).json({
+      success: true,
+      data: newPackage,
+      message: 'Package created successfully!'
+    });
+  } catch (error) {
+    console.error('createPackage error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// 4. UPDATE PACKAGE
+// ============================================
+exports.updatePackage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = { ...req.body };
+
+    // Sanitize products array
+    if (updateData.products && Array.isArray(updateData.products)) {
+      updateData.products = updateData.products.map(sanitizeItem);
+    }
+
+    // Sanitize boxes items array
+    if (updateData.boxes && Array.isArray(updateData.boxes)) {
+      updateData.totalBoxesCount = updateData.boxes.length;
+      updateData.boxNo = updateData.boxes.length > 1 
+        ? `1/${updateData.boxes.length}` 
+        : (updateData.boxNo || '1/1');
+
+      updateData.boxes = updateData.boxes.map(box => ({
+        ...box,
+        items: (box.items || []).map(sanitizeItem)
+      }));
+    }
+
+    const updatedPackage = await Package.findByIdAndUpdate(
+      id,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    ).populate('createdBy', 'name email');
+
+    if (!updatedPackage) {
+      return res.status(404).json({ success: false, message: 'Package not found' });
+    }
 
     res.json({
       success: true,
-      data: packages,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      data: updatedPackage,
+      message: '✅ Package updated successfully!'
     });
   } catch (error) {
-    console.error('Get packages error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('updatePackage error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Update package status
-// @route   PUT /api/packages/:id/status
-// @access  Private
+// ============================================
+// 5. DELETE PACKAGE
+// ============================================
+exports.deletePackage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pkg = await Package.findByIdAndDelete(id);
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Package not found' });
+    }
+
+    res.json({
+      success: true,
+      message: `🗑️ Package "${pkg.orderId}" deleted successfully`
+    });
+  } catch (error) {
+    console.error('deletePackage error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// 6. UPDATE STATUS
+// ============================================
 exports.updatePackageStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const pkg = await Package.findById(req.params.id);
-
-    if (!pkg) {
-      return res.status(404).json({ message: 'Package not found' });
-    }
-
-    pkg.status = status;
+    const updateData = { status };
     if (status === 'completed') {
-      pkg.completedDate = new Date();
+      updateData.completedDate = new Date().toISOString().split('T')[0];
     }
 
-    await pkg.save();
-    res.json({ success: true, data: pkg });
+    const pkg = await Package.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
+    
+    res.json({ success: true, data: pkg, message: `Status updated to ${status}` });
   } catch (error) {
-    console.error('Update package status error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('updatePackageStatus error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Mark label generated
-// @route   PUT /api/packages/:id/label
-// @access  Private
+// ============================================
+// 7. MARK LABEL GENERATED
+// ============================================
 exports.markLabelGenerated = async (req, res) => {
   try {
-    const pkg = await Package.findById(req.params.id);
-    if (!pkg) {
-      return res.status(404).json({ message: 'Package not found' });
-    }
-
-    pkg.labelGenerated = true;
-    await pkg.save();
-
+    const pkg = await Package.findByIdAndUpdate(
+      req.params.id,
+      { labelGenerated: true, labelGeneratedAt: new Date() },
+      { new: true }
+    );
+    if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
     res.json({ success: true, data: pkg });
   } catch (error) {
-    console.error('Mark label generated error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Mark packing slip generated
-// @route   PUT /api/packages/:id/slip
-// @access  Private
+// ============================================
+// 8. MARK PACKING SLIP GENERATED
+// ============================================
 exports.markSlipGenerated = async (req, res) => {
   try {
-    const pkg = await Package.findById(req.params.id);
-    if (!pkg) {
-      return res.status(404).json({ message: 'Package not found' });
-    }
-
-    pkg.packingSlipGenerated = true;
-    pkg.packingSlipGeneratedAt = new Date();
-    await pkg.save();
-
+    const pkg = await Package.findByIdAndUpdate(
+      req.params.id,
+      { packingSlipGenerated: true, packingSlipGeneratedAt: new Date() },
+      { new: true }
+    );
+    if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
     res.json({ success: true, data: pkg });
   } catch (error) {
-    console.error('Mark slip generated error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: error.message });
   }
 };

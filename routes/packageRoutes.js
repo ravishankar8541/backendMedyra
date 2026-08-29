@@ -1,29 +1,33 @@
 const express = require('express');
 const router = express.Router();
-const { body } = require('express-validator');
 const {
-  createPackage,
   getPackages,
+  getPackageById,
+  createPackage,
+  updatePackage,
+  deletePackage,
   updatePackageStatus,
   markLabelGenerated,
   markSlipGenerated
 } = require('../controllers/packageController');
-const { protect } = require('../middleware/auth');
-
-const packageValidation = [
-  body('orderId').notEmpty().withMessage('Order ID required'),
-  body('customerName').notEmpty().withMessage('Customer name required'),
-  body('customerAddress').notEmpty().withMessage('Customer address required')
-];
+const { protect, restrictTo } = require('../middleware/auth');
 
 router.use(protect);
 
+// Main collection routes: Get All & Create
 router.route('/')
-  .post(packageValidation, createPackage)
-  .get(getPackages);
+  .get(getPackages)
+  .post(restrictTo('admin', 'manager', 'staff'), createPackage);
 
-router.put('/:id/status', updatePackageStatus);
-router.put('/:id/label', markLabelGenerated);
-router.put('/:id/slip', markSlipGenerated);
+// Single Item routes: Get Single, Update (Edit), and Delete
+router.route('/:id')
+  .get(getPackageById)
+  .put(restrictTo('admin', 'manager', 'staff'), updatePackage)
+  .delete(restrictTo('admin', 'manager', 'staff'), deletePackage);
+
+// Action routes
+router.patch('/:id/status', updatePackageStatus);
+router.patch('/:id/label', markLabelGenerated);
+router.patch('/:id/slip', markSlipGenerated);
 
 module.exports = router;
