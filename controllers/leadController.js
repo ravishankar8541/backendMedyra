@@ -248,7 +248,16 @@ exports.createLead = async (req, res) => {
           if (product) {
             item.productName = product.name;
             item.productSku = product.sku;
-            if (!item.costPrice) {
+
+            // Check if batch is selected, fetch batch specific cost
+            if (item.batch && item.batch !== 'NEW_BATCH') {
+              const matchedBatch = (product.batches || []).find(b => b.batchNumber === item.batch);
+              if (matchedBatch && matchedBatch.costPrice !== undefined) {
+                item.costPrice = matchedBatch.costPrice;
+              } else if (!item.costPrice) {
+                item.costPrice = product.pricing?.costPrice || 0;
+              }
+            } else if (!item.costPrice) {
               item.costPrice = product.pricing?.costPrice || 0;
             }
           }
@@ -443,11 +452,9 @@ exports.generateProforma = async (req, res) => {
       proformaType = 'international';
     }
 
-    // Preserve exact currency (EUR, GBP, USD, etc.)
     const finalCurrency = currency || lead.currency || (proformaType === 'international' ? 'USD' : 'INR');
     const effectiveExchangeRate = parseFloat(exchangeRate) || 1;
 
-    // ===== Calculate Items =====
     let subtotal = 0;
     const proformaItems = [];
 
@@ -480,7 +487,6 @@ exports.generateProforma = async (req, res) => {
             hsCode = product.hsnCode || hsCode;
             unit = product.unit || unit;
             countryOfOrigin = product.countryOfOrigin || countryOfOrigin;
-            costPrice = product.pricing?.costPrice || costPrice;
             description = product.description || description;
 
             if (batchNumber && batchNumber !== 'NEW_BATCH') {
@@ -488,12 +494,15 @@ exports.generateProforma = async (req, res) => {
               if (matchedBatch) {
                 mfgDate = matchedBatch.mfgDate || mfgDate;
                 expiryDate = matchedBatch.expDate || expiryDate;
+                // ✅ Accurately prioritize batch-specific costPrice
+                if (matchedBatch.costPrice !== undefined && matchedBatch.costPrice !== null) {
+                  costPrice = matchedBatch.costPrice;
+                } else {
+                  costPrice = product.pricing?.costPrice || costPrice;
+                }
               }
-            } else if (!batchNumber && product.batches && product.batches.length > 0) {
-              const firstBatch = product.batches[0];
-              batchNumber = firstBatch.batchNumber || '';
-              mfgDate = firstBatch.mfgDate || mfgDate;
-              expiryDate = firstBatch.expDate || expiryDate;
+            } else if (!costPrice) {
+              costPrice = product.pricing?.costPrice || 0;
             }
           }
         } catch (err) {
@@ -524,7 +533,6 @@ exports.generateProforma = async (req, res) => {
       });
     }
 
-    // ===== TAX + FREIGHT + INSURANCE =====
     let itemTax = 0;
     proformaItems.forEach(item => {
       itemTax += (item.total * (item.taxRate || 0)) / 100;
@@ -546,19 +554,15 @@ exports.generateProforma = async (req, res) => {
     const totalTax = itemTax + freightTax + insuranceTax;
     const rawTotal = subtotal + parsedFreight + parsedInsurance + totalTax;
 
-    // ✅ FIXED ROUND-OFF LOGIC
     let grandTotal, rounding;
     if (finalCurrency === 'INR' || proformaType === 'domestic') {
-      // Domestic → nearest whole number
       grandTotal = Math.round(rawTotal);
       rounding = Number((grandTotal - rawTotal).toFixed(2));
     } else {
-      // International → exact 2 decimals, no forced round-off
       grandTotal = Math.round(rawTotal * 100) / 100;
       rounding = 0;
     }
 
-    // ===== Proforma Number Generation =====
     const year = new Date().getFullYear();
     const prefix = proformaType === 'domestic' ? 'PF' : 'PFI';
     const regex = new RegExp(`^${prefix}-${year}/(\\d+)`);
@@ -826,7 +830,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
-    // Generate Invoice Number
     const year = new Date().getFullYear();
     const lastInvoice = await Invoice.findOne({
       invoiceNumber: { $regex: `MPDMS${year}/` }
@@ -882,7 +885,6 @@ exports.convertProformaToInvoice = async (req, res) => {
       subtotal += amount;
       tax += (amount * taxRate) / 100;
 
-      // Normalized profit & incentive calculation
       const rateInINR = rate * exchangeRateVal;
       const totalValueItemInINR = rateInINR * qty;
       const totalCostItemInINR = costPriceInINR * qty;
@@ -918,17 +920,14 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
-    // ✅ FIXED ROUND-OFF LOGIC
     const rawInvoiceTotal = subtotal + tax;
     const finalCurrency = proforma.currency || lead.currency || (proforma.type === 'international' ? 'USD' : 'INR');
 
     let grandTotal, rounding;
     if (finalCurrency === 'INR' || proforma.type === 'domestic') {
-      // Domestic → nearest whole number
       grandTotal = Math.round(rawInvoiceTotal);
       rounding = Number((grandTotal - rawInvoiceTotal).toFixed(2));
     } else {
-      // International → exact 2 decimals
       grandTotal = Math.round(rawInvoiceTotal * 100) / 100;
       rounding = 0;
     }
@@ -1237,6 +1236,27 @@ exports.createProformaRevision = async (req, res) => {
 
       const validProdId = (item.productId && isValidObjectId(item.productId)) ? item.productId : null;
 
+      let costPrice = item.costPrice || 0;
+      if (validProdId && (!costPrice || costPrice === 0)) {
+        try {
+          const product = await Product.findById(validProdId);
+          if (product) {
+            if (item.batch && item.batch !== 'NEW_BATCH') {
+              const matchedBatch = (product.batches || []).find(b => b.batchNumber === item.batch);
+              if (matchedBatch && matchedBatch.costPrice !== undefined) {
+                costPrice = matchedBatch.costPrice;
+              } else {
+                costPrice = product.pricing?.costPrice || 0;
+              }
+            } else {
+              costPrice = product.pricing?.costPrice || 0;
+            }
+          }
+        } catch (e) {
+          console.warn('Revision cost lookup err', e);
+        }
+      }
+
       proformaItems.push({
         productId: validProdId,
         productName: item.productName || 'Product',
@@ -1254,7 +1274,7 @@ exports.createProformaRevision = async (req, res) => {
         mfgDate: item.mfgDate || '',
         expiryDate: item.expiryDate || '',
         countryOfOrigin: item.countryOfOrigin || 'India',
-        costPrice: item.costPrice || 0,
+        costPrice: costPrice,
         profitAmount: 0,
         profitPercentage: 0,
         incentive: 0
@@ -1280,7 +1300,6 @@ exports.createProformaRevision = async (req, res) => {
     const totalTax = itemTax + freightTax + insuranceTax;
     const rawTotal = subtotal + parsedFreight + parsedInsurance + totalTax;
 
-    // ✅ FIXED ROUND-OFF LOGIC
     let grandTotal, rounding;
     const finalCurrency = currency || current.currency || (isInternational ? 'USD' : 'INR');
 

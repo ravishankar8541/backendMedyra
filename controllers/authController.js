@@ -35,7 +35,7 @@ exports.register = async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, email, password, phone, role, department } = req.body;
+    const { name, email, password, phone, role, department, status } = req.body;
 
     // Check if user exists
     const existingUser = await User.findOne({ email });
@@ -43,7 +43,6 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'User already exists' });
     }
 
-    // ✅ CHANGED: Create user with permissions
     const userRole = role || 'staff';
     const user = new User({
       name,
@@ -51,10 +50,10 @@ exports.register = async (req, res) => {
       password,
       phone,
       role: userRole,
-      department,
-      status: 'pending',
-      emailVerified: false,
-      permissions: getDefaultPermissions(userRole) // ✅ ADD THIS LINE
+      department: department || 'General',
+      status: status || 'active', // ✅ Defaults to 'active' so the user can immediately log in
+      emailVerified: true,
+      permissions: getDefaultPermissions(userRole)
     });
 
     await user.save();
@@ -76,7 +75,6 @@ exports.register = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
-
 // @desc    Login user
 // @route   POST /api/auth/login
 // @access  Public

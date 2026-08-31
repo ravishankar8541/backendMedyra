@@ -7,13 +7,15 @@ const {
   getGRNs,
   getGRN,
   deleteGRN,
+  addPayment,
+  generatePurchaseInvoice,
   getConsolidatedInvoices,
   getConsolidatedInvoice,
   addConsolidatedPayment,
   getReceiptDashboard
 } = require('../controllers/goodsReceiptController');
 
-// All routes protected
+// All routes protected by JWT auth
 router.use(protect);
 
 // ============================================
@@ -22,7 +24,7 @@ router.use(protect);
 router.get('/dashboard', getReceiptDashboard);
 
 // ============================================
-// CONSOLIDATED INVOICE ROUTES
+// CONSOLIDATED PURCHASE INVOICE (PI) ROUTES
 // ============================================
 router.get('/invoices', getConsolidatedInvoices);
 router.get('/invoices/:invoiceId', getConsolidatedInvoice);
@@ -35,6 +37,12 @@ router
   .route('/')
   .get(getGRNs)
   .post(restrictTo('admin', 'manager'), createGRN);
+
+// ============================================
+// SINGLE GRN ACTIONS (PAYMENT & INVOICE GENERATE)
+// ============================================
+router.post('/:id/payment', restrictTo('admin', 'manager'), addPayment);
+router.post('/:id/generate-invoice', restrictTo('admin', 'manager'), generatePurchaseInvoice);
 
 // ============================================
 // SINGLE GRN (GET / DELETE)

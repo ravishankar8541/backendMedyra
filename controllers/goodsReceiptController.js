@@ -119,6 +119,10 @@ exports.createGRN = async (req, res) => {
       finalSupplierName = 'Vendor / Supplier';
     }
 
+    // Currency and Effective Exchange Rate
+    const poCurrency = currency || po.currency || 'INR';
+    const effExchangeRate = Number(exchangeRate || po.exchangeRate || 1) || 1;
+
     // Check if an existing GRN already exists for this PO
     let existingGRN = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId });
     const isFirstReceipt = !existingGRN;
@@ -179,14 +183,44 @@ exports.createGRN = async (req, res) => {
       const userMfgDate = item.mfgDate || '';
       const userExpDate = item.expDate || '';
 
+      // ⭐ CONVERT FOREIGN CURRENCY PURCHASE COST TO INR (₹) FOR STOCK MANAGEMENT ⭐
+      const costInINR = rate > 0 
+        ? (poCurrency !== 'INR' && effExchangeRate > 0 ? Number((rate * effExchangeRate).toFixed(2)) : rate)
+        : (product?.pricing?.costPrice || 0);
+
+      // ⭐ CONVERT MRP & SELLING PRICE TO INR (₹) IF ENTERED IN FOREIGN CURRENCY ⭐
+      const rawMrp = (item.mrp !== undefined && item.mrp !== null && item.mrp !== '' && !isNaN(Number(item.mrp)))
+        ? Number(item.mrp)
+        : 0;
+
+      const rawSellingPrice = (item.sellingPrice !== undefined && item.sellingPrice !== null && item.sellingPrice !== '' && !isNaN(Number(item.sellingPrice)))
+        ? Number(item.sellingPrice)
+        : 0;
+
+      let finalMrpInINR = 0;
+      if (rawMrp > 0) {
+        finalMrpInINR = (poCurrency !== 'INR' && effExchangeRate > 0)
+          ? Number((rawMrp * effExchangeRate).toFixed(2))
+          : rawMrp;
+      } else {
+        finalMrpInINR = product?.pricing?.mrp || 0;
+      }
+
+      let finalSellingPriceInINR = 0;
+      if (rawSellingPrice > 0) {
+        finalSellingPriceInINR = (poCurrency !== 'INR' && effExchangeRate > 0)
+          ? Number((rawSellingPrice * effExchangeRate).toFixed(2))
+          : rawSellingPrice;
+      } else if (product?.pricing?.sellingPrice) {
+        finalSellingPriceInINR = product.pricing.sellingPrice;
+      } else if (costInINR > 0) {
+        finalSellingPriceInINR = Number((costInINR * 1.2).toFixed(2));
+      }
+
       // ===== UPDATE STOCK & BATCHES / MOVEMENTS IN PRODUCT =====
       if (product) {
         const productType = product.productType || product.basicInfo?.productType || 'batch';
         const isBatchProduct = productType !== 'non-batch';
-
-        const defaultMrp = product.pricing?.mrp || 0;
-        const defaultCost = rate > 0 ? rate : (product.pricing?.costPrice || 0);
-        const defaultSell = product.pricing?.sellingPrice || (rate > 0 ? rate * 1.2 : 0);
 
         if (isBatchProduct) {
           if (!Array.isArray(product.batches)) {
@@ -197,21 +231,23 @@ exports.createGRN = async (req, res) => {
             ? item.batchNumber.trim()
             : `BATCH-${Date.now().toString().slice(-6)}`;
 
-          // Save batch with clear supplierName
+          // Save batch with accurate INR converted Cost, MRP and Selling Price
           product.batches.push({
             batchNumber: batchNumber,
             mfgDate: userMfgDate,
             expDate: userExpDate,
             quantity: receivedQty,
-            costPrice: defaultCost,
-            sellingPrice: defaultSell,
-            mrp: defaultMrp,
+            costPrice: costInINR,
+            sellingPrice: finalSellingPriceInINR,
+            mrp: finalMrpInINR,
             supplierName: finalSupplierName,
             supplier: possibleSupId,
             manufacturer: product.manufacturer || product.basicInfo?.manufacturer || 'N/A',
             addedDate: receivedDate || new Date().toISOString().split('T')[0],
             addedBy: req.user?.name || receivedBy || 'System',
-            reason: `GRN ${existingGRN?.grnNumber || po.poNumber} @ ₹${defaultCost.toFixed(2)}`
+            reason: poCurrency !== 'INR'
+              ? `GRN ${existingGRN?.grnNumber || po.poNumber} (${rate} ${poCurrency} @ Exch ${effExchangeRate} = ₹${costInINR.toFixed(2)})`
+              : `GRN ${existingGRN?.grnNumber || po.poNumber} @ ₹${costInINR.toFixed(2)}`
           });
 
           product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
@@ -228,11 +264,13 @@ exports.createGRN = async (req, res) => {
             date: new Date(),
             type: 'add',
             quantity: receivedQty,
-            mrp: defaultMrp,
-            costPrice: defaultCost,
-            sellingPrice: defaultSell,
+            mrp: finalMrpInINR,
+            costPrice: costInINR,
+            sellingPrice: finalSellingPriceInINR,
             supplierName: finalSupplierName,
-            reason: `Received via GRN (${po.poNumber || 'GRN'})`
+            reason: poCurrency !== 'INR'
+              ? `Received via GRN (${po.poNumber || 'GRN'}) (${rate} ${poCurrency} @ Exch ${effExchangeRate} = ₹${costInINR.toFixed(2)})`
+              : `Received via GRN (${po.poNumber || 'GRN'})`
           });
           product.markModified('stockMovements');
         }
@@ -274,6 +312,8 @@ exports.createGRN = async (req, res) => {
         mfgDate: userMfgDate,
         expDate: userExpDate,
         unitPrice: rate,
+        mrp: rawMrp,
+        sellingPrice: rawSellingPrice,
         taxRate,
         subtotal: itemSubtotal,
         tax: itemTax,
@@ -329,8 +369,14 @@ exports.createGRN = async (req, res) => {
       const chargesSubtotal = freightData.amount + insuranceData.amount + inventoryData.amount;
       const chargesTax = freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
       const exactTotal = subtotal + totalTax + chargesSubtotal + chargesTax;
-      const grandTotal = Math.round(exactTotal);
-      const roundOff = Number((grandTotal - exactTotal).toFixed(2));
+
+      const isInternational = poCurrency && poCurrency !== 'INR';
+      const grandTotal = isInternational
+        ? Number(exactTotal.toFixed(2))
+        : Math.round(exactTotal);
+      const roundOff = isInternational
+        ? 0
+        : Number((grandTotal - exactTotal).toFixed(2));
 
       grn = new GoodsReceipt({
         grnNumber,
@@ -349,8 +395,8 @@ exports.createGRN = async (req, res) => {
         notes: notes || '',
         status: 'completed',
         createdBy: req.user?.id || req.user?._id,
-        currency: currency || po.currency || 'INR',
-        exchangeRate: exchangeRate || po.exchangeRate || 1,
+        currency: poCurrency,
+        exchangeRate: effExchangeRate,
         subtotal,
         totalTax,
         chargesSubtotal,
@@ -392,6 +438,8 @@ exports.createGRN = async (req, res) => {
           if (newItem.batchNumber && newItem.batchNumber !== 'N/A') ex.batchNumber = newItem.batchNumber;
           if (newItem.mfgDate) ex.mfgDate = newItem.mfgDate;
           if (newItem.expDate) ex.expDate = newItem.expDate;
+          if (newItem.mrp) ex.mrp = newItem.mrp;
+          if (newItem.sellingPrice) ex.sellingPrice = newItem.sellingPrice;
         } else {
           mergedItems.push(newItem);
         }
@@ -407,10 +455,16 @@ exports.createGRN = async (req, res) => {
       grn.items = mergedItems;
       grn.subtotal = newSubtotal;
       grn.totalTax = newTotalTax;
-      
+
       const exactTotal = newSubtotal + newTotalTax + (grn.chargesSubtotal || 0) + (grn.chargesTax || 0);
-      grn.grandTotal = Math.round(exactTotal);
-      grn.roundOff = Number((grn.grandTotal - exactTotal).toFixed(2));
+      const curr = grn.currency || poCurrency;
+      const isInternational = curr && curr !== 'INR';
+      grn.grandTotal = isInternational
+        ? Number(exactTotal.toFixed(2))
+        : Math.round(exactTotal);
+      grn.roundOff = isInternational
+        ? 0
+        : Number((grn.grandTotal - exactTotal).toFixed(2));
 
       if (paymentEntry) {
         if (!Array.isArray(grn.payments)) grn.payments = [];
@@ -499,8 +553,8 @@ exports.createGRN = async (req, res) => {
         insurance: grn.insurance,
         inventoryCharges: grn.inventoryCharges,
         gstType: gstType || po.gstType || 'igst',
-        currency: currency || po.currency || 'INR',
-        exchangeRate: exchangeRate || po.exchangeRate || 1,
+        currency: poCurrency,
+        exchangeRate: effExchangeRate,
         paidAmount: grn.paidAmount || 0,
         payments: grn.payments || [],
         remainingAmount: Math.max(0, grn.grandTotal - (grn.paidAmount || 0)),
@@ -540,7 +594,7 @@ exports.createGRN = async (req, res) => {
       overpaymentCredit: overpaymentCredit > 0 ? overpaymentCredit : 0,
       isFirstReceipt,
       message: isFirstReceipt
-        ? `GRN ${grn.grnNumber} created and stock updated.`
+        ? `GRN ${grn.grnNumber} created and stock updated (Cost, MRP & Selling converted to ₹).`
         : `Updated GRN ${grn.grnNumber} with newly received items and stock updated.`
     });
   } catch (error) {
@@ -550,7 +604,7 @@ exports.createGRN = async (req, res) => {
 };
 
 // ============================================
-// ADD PAYMENT (FIXED: ACCEPTS BOTH GRN ID & INVOICE ID)
+// ADD PAYMENT (ACCEPTS BOTH GRN ID & INVOICE ID)
 // ============================================
 exports.addPayment = async (req, res) => {
   try {
