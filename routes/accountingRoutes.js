@@ -1,3 +1,6 @@
+
+
+
 // routes/accountingRoutes.js
 const express = require('express');
 const router = express.Router();
@@ -34,7 +37,7 @@ router.route('/journals')
   .get(getJournalEntries)
   .post(restrictTo('admin', 'accountant'), createJournalEntry);
 
-// Financial Statements & Ledgers
+// Financial Statements & Statements
 router.get('/ledger', getGeneralLedger);
 router.get('/trial-balance', getTrialBalance);
 router.get('/pnl', getProfitLoss);
