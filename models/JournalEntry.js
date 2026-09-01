@@ -1,7 +1,41 @@
+// models/JournalEntry.js
 const mongoose = require('mongoose');
 
+const JournalLineSchema = new mongoose.Schema({
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Account',
+    required: true
+  },
+  accountCode: String,
+  accountName: String,
+  debit: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  credit: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  description: {
+    type: String,
+    default: ''
+  },
+  entityType: {
+    type: String,
+    enum: ['Customer', 'Supplier', 'User', 'Other'],
+    default: 'Other'
+  },
+  entityId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
+  }
+}, { _id: true });
+
 const JournalEntrySchema = new mongoose.Schema({
-  voucherNo: {
+  entryNumber: {
     type: String,
     required: true,
     unique: true
@@ -11,64 +45,51 @@ const JournalEntrySchema = new mongoose.Schema({
     required: true,
     default: Date.now
   },
-  description: {
+  referenceNumber: {
     type: String,
-    required: true
+    default: ''
   },
-  entries: [{
-    account: {
-      type: String,
-      required: true
-    },
-    type: {
-      type: String,
-      enum: ['debit', 'credit'],
-      required: true
-    },
-    amount: {
-      type: Number,
-      required: true
-    },
-    description: String
-  }],
-  reference: String,
+  sourceModule: {
+    type: String,
+    enum: ['manual', 'sales_invoice', 'purchase_invoice', 'payment_receipt', 'payment_disbursement', 'inventory_adjustment'],
+    default: 'manual'
+  },
+  sourceId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
+  },
+  memo: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  lines: [JournalLineSchema],
+  totalDebit: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  totalCredit: {
+    type: Number,
+    required: true,
+    min: 0
+  },
   status: {
     type: String,
-    enum: ['draft', 'posted', 'cancelled'],
-    default: 'draft'
+    enum: ['draft', 'posted', 'void'],
+    default: 'posted'
+  },
+  currency: {
+    type: String,
+    default: 'INR'
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  },
-  postedDate: Date,
-  notes: String
-}, {
-  timestamps: true
-});
-
-// Generate voucher number
-JournalEntrySchema.pre('save', function(next) {
-  if (this.isNew && !this.voucherNo) {
-    const count = Math.floor(Math.random() * 1000);
-    this.voucherNo = `JV-${String(count).padStart(3, '0')}`;
   }
-  next();
-});
+}, { timestamps: true });
 
-// Ensure entries balance
-JournalEntrySchema.pre('save', function(next) {
-  const totalDebit = this.entries
-    .filter(e => e.type === 'debit')
-    .reduce((sum, e) => sum + e.amount, 0);
-  const totalCredit = this.entries
-    .filter(e => e.type === 'credit')
-    .reduce((sum, e) => sum + e.amount, 0);
-  
-  if (Math.abs(totalDebit - totalCredit) > 0.01) {
-    next(new Error('Journal entries must balance (total debit = total credit)'));
-  }
-  next();
-});
+JournalEntrySchema.index({ entryNumber: 1, date: -1 });
+JournalEntrySchema.index({ 'lines.account': 1, date: -1 });
 
-module.exports = mongoose.model('JournalEntry', JournalEntrySchema);
+module.exports = mongoose.models.JournalEntry || mongoose.model('JournalEntry', JournalEntrySchema);

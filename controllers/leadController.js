@@ -207,7 +207,6 @@ const calculateItemTotals = (item, exchangeRate = 1) => {
   const costPriceInINR = item.costPrice || 0;
   const exRate = parseFloat(exchangeRate) || 1;
 
-  // Normalized to INR for Profit and Incentive calculations
   const sellingPriceInINR = sellingPriceForeign * exRate;
   const totalValueInINR = sellingPriceInINR * qty;
   const totalCostInINR = costPriceInINR * qty;
@@ -249,7 +248,6 @@ exports.createLead = async (req, res) => {
             item.productName = product.name;
             item.productSku = product.sku;
 
-            // Check if batch is selected, fetch batch specific cost
             if (item.batch && item.batch !== 'NEW_BATCH') {
               const matchedBatch = (product.batches || []).find(b => b.batchNumber === item.batch);
               if (matchedBatch && matchedBatch.costPrice !== undefined) {
@@ -319,7 +317,9 @@ exports.updateLead = async (req, res) => {
     const allowedFields = [
       'name', 'phone', 'email', 'address', 'gst',
       'drugLicense', 'state', 'stateCode', 'source', 'notes',
-      'currency', 'country', 'countryCode', 'channel', 'salesPerson'
+      'currency', 'country', 'countryCode', 'channel', 'salesPerson', 'companyName',
+      'contactPerson', 'alternativePhone', 'website', 'city', 'postalCode', 'ntfnNumber',
+      'businessType', 'bankName', 'accountTitle', 'accountNumber', 'branchCode', 'paymentTerms'
     ];
 
     allowedFields.forEach(field => {
@@ -494,7 +494,6 @@ exports.generateProforma = async (req, res) => {
               if (matchedBatch) {
                 mfgDate = matchedBatch.mfgDate || mfgDate;
                 expiryDate = matchedBatch.expDate || expiryDate;
-                // ✅ Accurately prioritize batch-specific costPrice
                 if (matchedBatch.costPrice !== undefined && matchedBatch.costPrice !== null) {
                   costPrice = matchedBatch.costPrice;
                 } else {
@@ -633,7 +632,7 @@ exports.generateProforma = async (req, res) => {
       insuranceTax,
 
       channel: channel || (proformaType === 'international' ? 'International' : 'Domestic'),
-      salesPerson: salesPerson || '',
+      salesPerson: salesPerson || (req.user?.name || ''),
       deliveryTime,
       validUntil: (validUntil && !isNaN(new Date(validUntil).getTime())) ? new Date(validUntil) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       paymentTerms,
@@ -1389,22 +1388,44 @@ exports.createProformaRevision = async (req, res) => {
 };
 
 // ============================================
-// GET LEADS & STATS
+// GET LEADS (WITH ROLE-BASED FILTERING)
 // ============================================
 exports.getLeads = async (req, res) => {
   try {
     const { page = 1, limit = 100, status, source, assignedTo, search, sortBy = '-createdAt' } = req.query;
     const query = {};
+
+    // ✅ ROLE FILTER: Non-admin / non-manager users (e.g. telecallers) only see their own assigned/created leads
+    if (req.user && req.user.role !== 'admin' && req.user.role !== 'manager') {
+      const userId = req.user.id || req.user._id;
+      query.$or = [
+        { assignedTo: userId },
+        { createdBy: userId }
+      ];
+    } else if (assignedTo) {
+      query.assignedTo = assignedTo;
+    }
+
     if (status && status !== 'all') query.status = status;
     if (source && source !== 'all') query.source = source;
-    if (assignedTo) query.assignedTo = assignedTo;
 
     if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-        { companyName: { $regex: search, $options: 'i' } }
+      const searchRegex = { $regex: search, $options: 'i' };
+      const searchCond = [
+        { name: searchRegex },
+        { phone: searchRegex },
+        { companyName: searchRegex }
       ];
+
+      if (query.$or) {
+        query.$and = [
+          { $or: query.$or },
+          { $or: searchCond }
+        ];
+        delete query.$or;
+      } else {
+        query.$or = searchCond;
+      }
     }
 
     const leads = await Lead.find(query)
@@ -1487,26 +1508,43 @@ exports.deleteLead = async (req, res) => {
   }
 };
 
+// ============================================
+// GET LEAD STATS (ROLE-BASED FILTERING)
+// ============================================
 exports.getLeadStats = async (req, res) => {
   try {
-    const stats = await Lead.aggregate([
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          new: { $sum: { $cond: [{ $eq: ['$status', 'new'] }, 1, 0] } },
-          contacted: { $sum: { $cond: [{ $eq: ['$status', 'contacted'] }, 1, 0] } },
-          qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } },
-          proforma_sent: { $sum: { $cond: [{ $eq: ['$status', 'proforma_sent'] }, 1, 0] } },
-          order_confirmed: { $sum: { $cond: [{ $eq: ['$status', 'order_confirmed'] }, 1, 0] } },
-          payment_pending: { $sum: { $cond: [{ $eq: ['$status', 'payment_pending'] }, 1, 0] } },
-          converted: { $sum: { $cond: [{ $eq: ['$status', 'converted'] }, 1, 0] } },
-          lost: { $sum: { $cond: [{ $eq: ['$status', 'lost'] }, 1, 0] } },
-          totalValue: { $sum: { $ifNull: ['$totalValue', '$value'] } },
-          totalIncentive: { $sum: { $ifNull: ['$totalIncentive', '$incentive'] } }
-        }
+    const matchQuery = {};
+    if (req.user && req.user.role !== 'admin' && req.user.role !== 'manager') {
+      const uId = new mongoose.Types.ObjectId(req.user.id || req.user._id);
+      matchQuery.$or = [
+        { assignedTo: uId },
+        { createdBy: uId }
+      ];
+    }
+
+    const pipeline = [];
+    if (Object.keys(matchQuery).length > 0) {
+      pipeline.push({ $match: matchQuery });
+    }
+
+    pipeline.push({
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        new: { $sum: { $cond: [{ $eq: ['$status', 'new'] }, 1, 0] } },
+        contacted: { $sum: { $cond: [{ $eq: ['$status', 'contacted'] }, 1, 0] } },
+        qualified: { $sum: { $cond: [{ $eq: ['$status', 'qualified'] }, 1, 0] } },
+        proforma_sent: { $sum: { $cond: [{ $eq: ['$status', 'proforma_sent'] }, 1, 0] } },
+        order_confirmed: { $sum: { $cond: [{ $eq: ['$status', 'order_confirmed'] }, 1, 0] } },
+        payment_pending: { $sum: { $cond: [{ $eq: ['$status', 'payment_pending'] }, 1, 0] } },
+        converted: { $sum: { $cond: [{ $eq: ['$status', 'converted'] }, 1, 0] } },
+        lost: { $sum: { $cond: [{ $eq: ['$status', 'lost'] }, 1, 0] } },
+        totalValue: { $sum: { $ifNull: ['$totalValue', '$value'] } },
+        totalIncentive: { $sum: { $ifNull: ['$totalIncentive', '$incentive'] } }
       }
-    ]);
+    });
+
+    const stats = await Lead.aggregate(pipeline);
 
     const result = stats[0] || {
       total: 0, new: 0, contacted: 0, qualified: 0, proforma_sent: 0,

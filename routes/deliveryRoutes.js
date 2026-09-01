@@ -1,27 +1,24 @@
 const express = require('express');
 const router = express.Router();
-const { body } = require('express-validator');
 const {
-  createDelivery,
   getDeliveries,
-  updateDeliveryStatus,
-  getDeliveryStats
+  createDelivery,
+  syncFromPackages,
+  confirmDelivery,
+  updateStatus,
+  deleteDelivery
 } = require('../controllers/deliveryController');
-const { protect, restrictTo } = require('../middleware/auth');
-
-const deliveryValidation = [
-  body('order').notEmpty().withMessage('Order required'),
-  body('assignedTo').notEmpty().withMessage('Delivery agent required')
-];
+const { protect } = require('../middleware/auth');
 
 router.use(protect);
 
-router.get('/stats', getDeliveryStats);
-
 router.route('/')
-  .post(restrictTo('admin', 'manager'), deliveryValidation, createDelivery)
-  .get(getDeliveries);
+  .get(getDeliveries)
+  .post(createDelivery);
 
-router.put('/:id/status', updateDeliveryStatus);
+router.post('/sync-packages', syncFromPackages);
+router.patch('/:id/confirm', confirmDelivery);
+router.patch('/:id/status', updateStatus);
+router.delete('/:id', deleteDelivery);
 
 module.exports = router;

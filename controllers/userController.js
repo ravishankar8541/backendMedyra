@@ -132,26 +132,27 @@ exports.updateUserStatus = async (req, res) => {
   }
 };
 
-// @desc    Reset user password
-// @route   POST /api/users/:id/reset-password
-// @access  Private (Admin)
+
 exports.resetPassword = async (req, res) => {
   try {
+    const { newPassword, password } = req.body;
     const user = await User.findById(req.params.id);
+    
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Generate temporary password
-    const tempPassword = Math.random().toString(36).slice(-8);
-    user.password = tempPassword;
-    user.forcePasswordChange = true;
+    // Agar frontend se newPassword aya hai toh wahi set karein, warna temp password
+    const passwordToSet = newPassword || password || Math.random().toString(36).slice(-8);
+    
+    user.password = passwordToSet;
+    user.forcePasswordChange = false;
     await user.save();
 
     res.json({
       success: true,
-      message: 'Password reset successfully',
-      tempPassword
+      message: 'Password updated successfully',
+      tempPassword: (!newPassword && !password) ? passwordToSet : undefined
     });
   } catch (error) {
     console.error('Reset password error:', error);

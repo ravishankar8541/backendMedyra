@@ -1,57 +1,90 @@
 const mongoose = require('mongoose');
 
 const DeliverySchema = new mongoose.Schema({
-  order: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Order',
-    required: true
+  deliveryNumber: {
+    type: String,
+    required: true,
+    unique: true
   },
-  orderNumber: String,
+  orderId: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  invoiceNo: {
+    type: String,
+    default: ''
+  },
+  packageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Package',
+    default: null
+  },
   customer: {
-    name: String,
-    phone: String,
-    address: String
+    name: { type: String, required: true },
+    phone: { type: String, required: true },
+    address: { type: String, required: true },
+    city: { type: String, default: '' },
+    state: { type: String, default: '' },
+    country: { type: String, default: 'India' }
   },
-  assignedTo: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+  itemsSummary: {
+    type: String,
+    default: ''
   },
-  assignedDate: Date,
-  pickupDate: Date,
-  deliveryDate: Date,
-  deliveryTime: String,
+  totalBoxes: {
+    type: Number,
+    default: 1
+  },
+  totalWeight: {
+    type: String,
+    default: ''
+  },
+  driverName: {
+    type: String,
+    default: 'Self / Courier'
+  },
+  driverPhone: {
+    type: String,
+    default: ''
+  },
+  trackingNumber: {
+    type: String,
+    default: ''
+  },
   status: {
     type: String,
-    enum: ['assigned', 'picked_up', 'in_transit', 'delivered', 'delayed', 'failed'],
-    default: 'assigned'
+    enum: ['pending', 'out_for_delivery', 'delivered', 'failed', 'returned'],
+    default: 'pending'
   },
-  priority: {
+  dispatchDate: {
+    type: Date,
+    default: Date.now
+  },
+  // "Pahuch Gaya" Confirmation Details
+  deliveredAt: {
+    type: Date,
+    default: null
+  },
+  receivedBy: {
     type: String,
-    enum: ['low', 'medium', 'high', 'urgent'],
-    default: 'medium'
+    default: ''
   },
-  distance: String,
-  estimatedTime: String,
-  delayReason: String,
-  deliveryNote: String,
-  proofImage: String,
-  signature: String,
-  trackingNumber: String,
-  routeOptimized: Boolean,
-  route: [{
-    lat: Number,
-    lng: Number,
-    address: String,
-    stopNumber: Number
-  }],
-  startedAt: Date,
-  completedAt: Date,
+  receiverPhone: {
+    type: String,
+    default: ''
+  },
+  deliveryNotes: {
+    type: String,
+    default: ''
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'User',
+    default: null
   }
-}, {
-  timestamps: true
-});
+}, { timestamps: true });
 
-module.exports = mongoose.model('Delivery', DeliverySchema);
+DeliverySchema.index({ deliveryNumber: 1, orderId: 1, status: 1 });
+
+module.exports = mongoose.models.Delivery || mongoose.model('Delivery', DeliverySchema);
