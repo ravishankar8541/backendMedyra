@@ -1,37 +1,26 @@
 // routes/purchaseOrderRoutes.js
 const express = require('express');
 const router = express.Router();
-const { body } = require('express-validator');
-const { protect, restrictTo } = require('../middleware/auth');
+const multer = require('multer');
+const purchaseOrderController = require('../controllers/purchaseOrderController');
 
-const {
-  createPurchaseOrder,
-  getPurchaseOrders,
-  updatePurchaseOrderStatus,
-  deletePurchaseOrder,
-  getPurchaseOrder
-} = require('../controllers/purchaseOrderController');
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
 
-const poValidation = [
-  body('supplier').notEmpty().withMessage('Supplier required'),
-  body('items').isArray({ min: 1 }).withMessage('At least one item required')
-];
+// 🌐 Public PO View route (WhatsApp direct view bina auth)
+router.get('/public-view/:id', purchaseOrderController.getPublicPOView);
 
-// ============================================
-// MAIN ROUTES
-// ============================================
-router.route('/')
-  .post(protect, restrictTo('admin', 'manager'), poValidation, createPurchaseOrder)
-  .get(protect, getPurchaseOrders);
+// Email Route
+router.post('/send-email', upload.single('pdf'), purchaseOrderController.sendPOEmail);
 
-router.route('/:id')
-  .get(protect, getPurchaseOrder)
-  .delete(protect, restrictTo('admin'), deletePurchaseOrder);
-
-// ============================================
-// STATUS UPDATE
-// ============================================
-router.put('/:id/status', protect, restrictTo('admin', 'manager'), updatePurchaseOrderStatus);
-
+// CRUD Routes
+router.post('/', purchaseOrderController.createPurchaseOrder);
+router.get('/', purchaseOrderController.getPurchaseOrders);
+router.get('/:id', purchaseOrderController.getPurchaseOrder);
+router.put('/:id', purchaseOrderController.updatePurchaseOrder); // ✏️ Full Edit PO
+router.put('/:id/status', purchaseOrderController.updatePurchaseOrderStatus);
+router.delete('/:id', purchaseOrderController.deletePurchaseOrder);
 
 module.exports = router;

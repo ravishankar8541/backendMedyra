@@ -60,7 +60,7 @@ app.use(helmet());
 app.use(morgan('dev'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // ============================================
 // EMAIL TRANSPORTER
@@ -75,56 +75,7 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// ============================================
-// SEND PO EMAIL - FIXED
-// ============================================
-app.post('/api/send-po-email', upload.single('pdf'), async (req, res) => {
-  try {
-    console.log('📧 Sending PO email...');
-    
-    // Parse email data
-    const emailData = JSON.parse(req.body.emailData);
-    const pdfBuffer = req.file;
 
-    if (!pdfBuffer) {
-      return res.status(400).json({ success: false, error: 'PDF file is required' });
-    }
-
-    if (!emailData.to) {
-      return res.status(400).json({ success: false, error: 'Recipient email is required' });
-    }
-
-    const mailOptions = {
-      from: `"Medyra Pharmaceutical" <${process.env.EMAIL_USER}>`,
-      to: emailData.to,
-      cc: emailData.cc || '',
-      subject: emailData.subject || 'Purchase Order from Medyra Pharmaceutical',
-      html: emailData.html || emailData.body || 'Please find attached the purchase order.',
-      attachments: [
-        {
-          filename: `PO-${emailData.poNumber || 'PO'}.pdf`,
-          content: pdfBuffer.buffer,
-          contentType: 'application/pdf'
-        }
-      ]
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log('✅ Email sent:', info.messageId);
-
-    res.json({
-      success: true,
-      messageId: info.messageId,
-      message: 'Email sent successfully'
-    });
-  } catch (error) {
-    console.error('❌ Email error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
 
 // ============================================
 // TEST EMAIL - SIMPLE DEBUG ENDPOINT
