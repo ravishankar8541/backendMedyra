@@ -1,0 +1,15 @@
+# Node.js specific
+.env
+.env.*
+!.env.example
+dist/
+build/
+node_modules/
+npm-debug.log
+yarn-error.log
+coverage/
+.nyc_output/
+.DS_Store
+*.log
+.pnp/
+.pnp.js
