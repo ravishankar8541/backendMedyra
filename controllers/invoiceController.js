@@ -528,10 +528,19 @@ exports.deleteInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
+    // ⭐ Automatically clean up double-entry journal vouchers for this invoice
+    const JournalEntry = require('../models/JournalEntry');
+    await JournalEntry.deleteMany({
+      $or: [
+        { sourceId: invoice._id },
+        { referenceNumber: invoice.invoiceNumber }
+      ]
+    });
+
     await invoice.deleteOne();
-    res.json({ success: true, message: `✅ Invoice deleted successfully` });
+    res.json({ success: true, message: `✅ Invoice and associated journal vouchers deleted successfully` });
   } catch (error) {
     console.error('Delete invoice error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
-}; // ← 
+};

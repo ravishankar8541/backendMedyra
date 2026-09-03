@@ -1,4 +1,3 @@
-
 // controllers/accountingController.js
 const mongoose = require('mongoose');
 const Account = require('../models/Account');
@@ -7,9 +6,9 @@ const Invoice = require('../models/Invoice');
 const { ConsolidatedInvoice, GoodsReceipt } = require('../models/GoodsReceipt');
 const Product = require('../models/Product');
 
-// Standard Chart of Accounts Seed Template
+// Standard Chart of Accounts Template
 const DEFAULT_ACCOUNTS = [
-  // Assets
+  // Assets (1000s)
   { code: '1000', name: 'Cash in Hand', type: 'asset', subType: 'cash', isSystem: true },
   { code: '1010', name: 'Kotak Bank Main A/c (7548895846)', type: 'asset', subType: 'bank', isSystem: true },
   { code: '1020', name: 'Accounts Receivable (Debtors)', type: 'asset', subType: 'accounts_receivable', isSystem: true },
@@ -19,36 +18,48 @@ const DEFAULT_ACCOUNTS = [
   { code: '1042', name: 'Input GST Credit (IGST)', type: 'asset', subType: 'current_asset', isSystem: true },
   { code: '1500', name: 'Warehouse & Office Equipment', type: 'asset', subType: 'fixed_asset', isSystem: false },
 
-  // Liabilities
+  // Liabilities (2000s)
   { code: '2000', name: 'Accounts Payable (Creditors / Suppliers)', type: 'liability', subType: 'accounts_payable', isSystem: true },
   { code: '2010', name: 'Output CGST Payable', type: 'liability', subType: 'tax_payable', isSystem: true },
   { code: '2011', name: 'Output SGST Payable', type: 'liability', subType: 'tax_payable', isSystem: true },
   { code: '2012', name: 'Output IGST Payable', type: 'liability', subType: 'tax_payable', isSystem: true },
   { code: '2020', name: 'Advance Received from Clients', type: 'liability', subType: 'current_liability', isSystem: true },
 
-  // Equity
+  // Equity (3000s)
   { code: '3000', name: 'Owner’s Capital / Share Capital', type: 'equity', subType: 'equity', isSystem: true },
   { code: '3010', name: 'Retained Earnings', type: 'equity', subType: 'retained_earnings', isSystem: true },
 
-  // Revenue
+  // Revenue (4000s)
   { code: '4000', name: 'Sales Revenue - Domestic', type: 'revenue', subType: 'operating_revenue', isSystem: true },
   { code: '4010', name: 'Sales Revenue - Export', type: 'revenue', subType: 'operating_revenue', isSystem: true },
   { code: '4020', name: 'Freight & Logistics Recovery', type: 'revenue', subType: 'other_income', isSystem: false },
   { code: '4030', name: 'Insurance Recovery Income', type: 'revenue', subType: 'other_income', isSystem: false },
 
-  // Expenses
+  // Expenses (5000s)
   { code: '5000', name: 'Cost of Goods Sold (COGS)', type: 'expense', subType: 'cost_of_goods_sold', isSystem: true },
   { code: '5010', name: 'Procurement Purchases', type: 'expense', subType: 'cost_of_goods_sold', isSystem: true },
   { code: '5020', name: 'Outward Freight & Shipping', type: 'expense', subType: 'operating_expense', isSystem: false },
   { code: '5030', name: 'Transit Insurance Expense', type: 'expense', subType: 'operating_expense', isSystem: false },
   { code: '5040', name: 'Sales Telecaller Incentive Expense', type: 'expense', subType: 'operating_expense', isSystem: false },
-  { code: '5050', name: 'Warehousing & Packaging Material', type: 'expense', subType: 'operating_expense', isSystem: false },
+  { code: '5050', name: 'Warehousing & Handling Expense', type: 'expense', subType: 'operating_expense', isSystem: false },
   { code: '5060', name: 'Bank Charges & Gateway Fees', type: 'expense', subType: 'financial_expense', isSystem: false },
   { code: '5070', name: 'Office Utilities & Administration', type: 'expense', subType: 'operating_expense', isSystem: false },
   { code: '5080', name: 'Round-off Expense / (Gain)', type: 'expense', subType: 'operating_expense', isSystem: false }
 ];
 
-// Helper: Calculate Live Total Stock Value from Product Collection
+const getAccountMap = async () => {
+  const existing = await Account.find({ isActive: true });
+  const map = new Map(existing.map(a => [a.code, a]));
+
+  for (const template of DEFAULT_ACCOUNTS) {
+    if (!map.has(template.code)) {
+      const created = await Account.create(template);
+      map.set(template.code, created);
+    }
+  }
+  return map;
+};
+
 const getLiveInventoryValuation = async () => {
   try {
     const products = await Product.find();
@@ -74,20 +85,464 @@ const getLiveInventoryValuation = async () => {
   }
 };
 
+// =========================================================================
+// ⚡ AUTOMATED JOURNAL ENTRY SYNCHRONIZER (WITH ORPHAN CLEANUP)
+// =========================================================================
+const syncAllAutomatedJournals = async () => {
+  try {
+    const accMap = await getAccountMap();
+
+    const [salesInvoices, purchaseInvoices] = await Promise.all([
+      Invoice.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: 1 }),
+      ConsolidatedInvoice.find().sort({ createdAt: 1 })
+    ]);
+
+    // -------------------------------------------------------------
+    // 0. CLEANUP ORPHANED AUTO-JOURNALS (IF INVOICE WAS DELETED)
+    // -------------------------------------------------------------
+    const salesInvIds = new Set(salesInvoices.map(i => String(i._id)));
+    const salesInvNums = new Set(salesInvoices.map(i => i.invoiceNumber));
+    const purchaseInvIds = new Set(purchaseInvoices.map(p => String(p._id)));
+    const purchaseInvNums = new Set(purchaseInvoices.map(p => p.invoiceNumber));
+
+    const allAutoJvs = await JournalEntry.find({
+      sourceModule: {
+        $in: ['sales_invoice', 'purchase_invoice', 'payment_receipt', 'payment_disbursement', 'inventory_adjustment']
+      }
+    });
+
+    for (const jv of allAutoJvs) {
+      const srcId = String(jv.sourceId || '');
+      const refNum = jv.referenceNumber || '';
+
+      if (['sales_invoice', 'inventory_adjustment', 'payment_receipt'].includes(jv.sourceModule)) {
+        if (!salesInvIds.has(srcId) && !salesInvNums.has(refNum)) {
+          await JournalEntry.findByIdAndDelete(jv._id);
+        }
+      } else if (['purchase_invoice', 'payment_disbursement'].includes(jv.sourceModule)) {
+        if (!purchaseInvIds.has(srcId) && !purchaseInvNums.has(refNum)) {
+          await JournalEntry.findByIdAndDelete(jv._id);
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // 1. AUTO POST SALES INVOICES & PAYMENTS
+    // -------------------------------------------------------------
+    for (const inv of salesInvoices) {
+      const invId = inv._id;
+      const invDate = inv.date ? new Date(inv.date) : new Date(inv.createdAt);
+      const isDomestic = inv.type === 'domestic' || !inv.type || inv.currency === 'INR';
+      const invNum = inv.invoiceNumber;
+      const totalAmount = Number(inv.total) || 0;
+      const subtotal = Number(inv.subtotal) || 0;
+      const tax = Number(inv.tax) || 0;
+      const freight = Number(inv.freight) || 0;
+      const insurance = Number(inv.insurance) || 0;
+      const cogs = Number(inv.totalCost) || 0;
+
+      const salesJvExists = await JournalEntry.findOne({
+        sourceModule: 'sales_invoice',
+        sourceId: invId
+      });
+
+      if (!salesJvExists && totalAmount > 0) {
+        const lines = [];
+
+        // Debit Debtors
+        lines.push({
+          account: accMap.get('1020')._id,
+          accountCode: '1020',
+          accountName: accMap.get('1020').name,
+          debit: totalAmount,
+          credit: 0,
+          description: `Bill to ${inv.customer?.name || 'Customer'}`
+        });
+
+        // Credit Sales Revenue
+        const revenueAccCode = isDomestic ? '4000' : '4010';
+        lines.push({
+          account: accMap.get(revenueAccCode)._id,
+          accountCode: revenueAccCode,
+          accountName: accMap.get(revenueAccCode).name,
+          debit: 0,
+          credit: subtotal,
+          description: `Sales revenue for ${invNum}`
+        });
+
+        // Credit Output Tax
+        if (tax > 0) {
+          if (inv.taxType === 'cgst_sgst' && isDomestic) {
+            const halfTax = Math.round((tax / 2) * 100) / 100;
+            lines.push({
+              account: accMap.get('2010')._id,
+              accountCode: '2010',
+              accountName: accMap.get('2010').name,
+              debit: 0,
+              credit: halfTax,
+              description: 'Output CGST'
+            });
+            lines.push({
+              account: accMap.get('2011')._id,
+              accountCode: '2011',
+              accountName: accMap.get('2011').name,
+              debit: 0,
+              credit: tax - halfTax,
+              description: 'Output SGST'
+            });
+          } else {
+            lines.push({
+              account: accMap.get('2012')._id,
+              accountCode: '2012',
+              accountName: accMap.get('2012').name,
+              debit: 0,
+              credit: tax,
+              description: 'Output IGST / Export Tax'
+            });
+          }
+        }
+
+        if (freight > 0) {
+          lines.push({
+            account: accMap.get('4020')._id,
+            accountCode: '4020',
+            accountName: accMap.get('4020').name,
+            debit: 0,
+            credit: freight,
+            description: 'Freight collected'
+          });
+        }
+        if (insurance > 0) {
+          lines.push({
+            account: accMap.get('4030')._id,
+            accountCode: '4030',
+            accountName: accMap.get('4030').name,
+            debit: 0,
+            credit: insurance,
+            description: 'Insurance collected'
+          });
+        }
+
+        const debits = lines.reduce((s, l) => s + l.debit, 0);
+        const credits = lines.reduce((s, l) => s + l.credit, 0);
+        const roundDiff = Number((debits - credits).toFixed(2));
+        if (Math.abs(roundDiff) > 0.001) {
+          if (roundDiff > 0) {
+            lines.push({
+              account: accMap.get('5080')._id,
+              accountCode: '5080',
+              accountName: accMap.get('5080').name,
+              debit: 0,
+              credit: roundDiff,
+              description: 'Invoice round-off gain'
+            });
+          } else {
+            lines.push({
+              account: accMap.get('5080')._id,
+              accountCode: '5080',
+              accountName: accMap.get('5080').name,
+              debit: Math.abs(roundDiff),
+              credit: 0,
+              description: 'Invoice round-off adjustment'
+            });
+          }
+        }
+
+        const totalD = lines.reduce((s, l) => s + l.debit, 0);
+        const totalC = lines.reduce((s, l) => s + l.credit, 0);
+
+        await JournalEntry.create({
+          entryNumber: `JV-INV-${invNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+          date: invDate,
+          referenceNumber: invNum,
+          sourceModule: 'sales_invoice',
+          sourceId: invId,
+          memo: `Sales Tax Invoice: ${invNum} — ${inv.customer?.name || 'Customer'}`,
+          lines,
+          totalDebit: Math.round(totalD * 100) / 100,
+          totalCredit: Math.round(totalC * 100) / 100,
+          status: 'posted'
+        });
+
+        if (cogs > 0) {
+          await JournalEntry.create({
+            entryNumber: `JV-COGS-${invNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+            date: invDate,
+            referenceNumber: invNum,
+            sourceModule: 'inventory_adjustment',
+            sourceId: invId,
+            memo: `COGS Recognition for ${invNum}`,
+            lines: [
+              {
+                account: accMap.get('5000')._id,
+                accountCode: '5000',
+                accountName: accMap.get('5000').name,
+                debit: cogs,
+                credit: 0,
+                description: `Cost of goods dispatched for ${invNum}`
+              },
+              {
+                account: accMap.get('1030')._id,
+                accountCode: '1030',
+                accountName: accMap.get('1030').name,
+                debit: 0,
+                credit: cogs,
+                description: `Inventory reduction for ${invNum}`
+              }
+            ],
+            totalDebit: cogs,
+            totalCredit: cogs,
+            status: 'posted'
+          });
+        }
+      }
+
+      // Customer payments
+      const payments = inv.payments || [];
+      for (let pIdx = 0; pIdx < payments.length; pIdx++) {
+        const pay = payments[pIdx];
+        const payAmt = Number(pay.amount) || 0;
+        if (payAmt <= 0) continue;
+
+        const payKey = `JV-RCT-${invNum.replace(/[^a-zA-Z0-9]/g, '')}-${pIdx + 1}`;
+        const rctExists = await JournalEntry.findOne({ entryNumber: payKey });
+
+        if (!rctExists) {
+          const bankCode = (pay.method === 'cash') ? '1000' : '1010';
+          await JournalEntry.create({
+            entryNumber: payKey,
+            date: pay.date ? new Date(pay.date) : invDate,
+            referenceNumber: pay.reference || invNum,
+            sourceModule: 'payment_receipt',
+            sourceId: invId,
+            memo: `Payment Received from ${inv.customer?.name || 'Customer'} on ${invNum} (${pay.method})`,
+            lines: [
+              {
+                account: accMap.get(bankCode)._id,
+                accountCode: bankCode,
+                accountName: accMap.get(bankCode).name,
+                debit: payAmt,
+                credit: 0,
+                description: `Collection via ${pay.method} [Ref: ${pay.reference || 'None'}]`
+              },
+              {
+                account: accMap.get('1020')._id,
+                accountCode: '1020',
+                accountName: accMap.get('1020').name,
+                debit: 0,
+                credit: payAmt,
+                description: `Receivables settled on ${invNum}`
+              }
+            ],
+            totalDebit: payAmt,
+            totalCredit: payAmt,
+            status: 'posted'
+          });
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // 2. AUTO POST PURCHASE INVOICES (PI) & VENDOR PAYMENTS
+    // -------------------------------------------------------------
+    for (const pi of purchaseInvoices) {
+      const piId = pi._id;
+      const piNum = pi.invoiceNumber;
+      const piDate = pi.invoiceDate ? new Date(pi.invoiceDate) : new Date(pi.createdAt);
+      const grandTotal = Number(pi.grandTotal) || 0;
+      const subtotal = Number(pi.subtotal) || 0;
+      const totalTax = Number(pi.totalTax) || 0;
+      const freightAmt = Number(pi.freight?.amount) || 0;
+      const insuranceAmt = Number(pi.insurance?.amount) || 0;
+
+      const piJvExists = await JournalEntry.findOne({
+        sourceModule: 'purchase_invoice',
+        sourceId: piId
+      });
+
+      if (!piJvExists && grandTotal > 0) {
+        const lines = [];
+
+        lines.push({
+          account: accMap.get('1030')._id,
+          accountCode: '1030',
+          accountName: accMap.get('1030').name,
+          debit: subtotal,
+          credit: 0,
+          description: `Stock receipt on ${piNum} from ${pi.supplierName}`
+        });
+
+        if (totalTax > 0) {
+          if (pi.gstType === 'cgst_sgst') {
+            const halfTax = Math.round((totalTax / 2) * 100) / 100;
+            lines.push({
+              account: accMap.get('1040')._id,
+              accountCode: '1040',
+              accountName: accMap.get('1040').name,
+              debit: halfTax,
+              credit: 0,
+              description: 'Input CGST credit'
+            });
+            lines.push({
+              account: accMap.get('1041')._id,
+              accountCode: '1041',
+              accountName: accMap.get('1041').name,
+              debit: totalTax - halfTax,
+              credit: 0,
+              description: 'Input SGST credit'
+            });
+          } else {
+            lines.push({
+              account: accMap.get('1042')._id,
+              accountCode: '1042',
+              accountName: accMap.get('1042').name,
+              debit: totalTax,
+              credit: 0,
+              description: 'Input IGST credit'
+            });
+          }
+        }
+
+        if (freightAmt > 0) {
+          lines.push({
+            account: accMap.get('5020')._id,
+            accountCode: '5020',
+            accountName: accMap.get('5020').name,
+            debit: freightAmt,
+            credit: 0,
+            description: 'Inward freight expense'
+          });
+        }
+        if (insuranceAmt > 0) {
+          lines.push({
+            account: accMap.get('5030')._id,
+            accountCode: '5030',
+            accountName: accMap.get('5030').name,
+            debit: insuranceAmt,
+            credit: 0,
+            description: 'Transit insurance expense'
+          });
+        }
+
+        lines.push({
+          account: accMap.get('2000')._id,
+          accountCode: '2000',
+          accountName: accMap.get('2000').name,
+          debit: 0,
+          credit: grandTotal,
+          description: `Payable to ${pi.supplierName}`
+        });
+
+        const debits = lines.reduce((s, l) => s + l.debit, 0);
+        const credits = lines.reduce((s, l) => s + l.credit, 0);
+        const diff = Number((debits - credits).toFixed(2));
+        if (Math.abs(diff) > 0.001) {
+          if (diff > 0) {
+            lines.push({
+              account: accMap.get('5080')._id,
+              accountCode: '5080',
+              accountName: accMap.get('5080').name,
+              debit: 0,
+              credit: diff,
+              description: 'Purchase bill round-off'
+            });
+          } else {
+            lines.push({
+              account: accMap.get('5080')._id,
+              accountCode: '5080',
+              accountName: accMap.get('5080').name,
+              debit: Math.abs(diff),
+              credit: 0,
+              description: 'Purchase bill round-off'
+            });
+          }
+        }
+
+        const totalD = lines.reduce((s, l) => s + l.debit, 0);
+        const totalC = lines.reduce((s, l) => s + l.credit, 0);
+
+        await JournalEntry.create({
+          entryNumber: `JV-PI-${piNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+          date: piDate,
+          referenceNumber: piNum,
+          sourceModule: 'purchase_invoice',
+          sourceId: piId,
+          memo: `Purchase Bill (PI): ${piNum} — ${pi.supplierName}`,
+          lines,
+          totalDebit: Math.round(totalD * 100) / 100,
+          totalCredit: Math.round(totalC * 100) / 100,
+          status: 'posted'
+        });
+      }
+
+      // Vendor payments
+      const piPayments = pi.payments || [];
+      for (let pIdx = 0; pIdx < piPayments.length; pIdx++) {
+        const pay = piPayments[pIdx];
+        const payAmt = Number(pay.amount) || 0;
+        if (payAmt <= 0) continue;
+
+        const payKey = `JV-DSB-${piNum.replace(/[^a-zA-Z0-9]/g, '')}-${pIdx + 1}`;
+        const dsbExists = await JournalEntry.findOne({ entryNumber: payKey });
+
+        if (!dsbExists) {
+          const bankCode = (pay.method === 'cash') ? '1000' : '1010';
+          await JournalEntry.create({
+            entryNumber: payKey,
+            date: pay.date ? new Date(pay.date) : piDate,
+            referenceNumber: pay.reference || piNum,
+            sourceModule: 'payment_disbursement',
+            sourceId: piId,
+            memo: `Disbursement to Supplier: ${pi.supplierName} on ${piNum} (${pay.method})`,
+            lines: [
+              {
+                account: accMap.get('2000')._id,
+                accountCode: '2000',
+                accountName: accMap.get('2000').name,
+                debit: payAmt,
+                credit: 0,
+                description: `Accounts payable settlement for ${piNum}`
+              },
+              {
+                account: accMap.get(bankCode)._id,
+                accountCode: bankCode,
+                accountName: accMap.get(bankCode).name,
+                debit: 0,
+                credit: payAmt,
+                description: `Paid via ${pay.method} [Ref: ${pay.reference || 'None'}]`
+              }
+            ],
+            totalDebit: payAmt,
+            totalCredit: payAmt,
+            status: 'posted'
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('❌ Automated Journal Sync error:', err);
+  }
+};
+
 // ============================================
-// 1. CHART OF ACCOUNTS
+// 1. MANUAL OR TRIGGERED AUTO-SYNC
+// ============================================
+exports.syncAutomatedJournals = async (req, res) => {
+  try {
+    await syncAllAutomatedJournals();
+    res.json({ success: true, message: 'All transactions synchronized and orphaned vouchers purged successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ============================================
+// 2. CHART OF ACCOUNTS
 // ============================================
 exports.initChartOfAccounts = async (req, res) => {
   try {
-    let created = 0;
-    for (const acc of DEFAULT_ACCOUNTS) {
-      const exists = await Account.findOne({ code: acc.code });
-      if (!exists) {
-        await Account.create({ ...acc, createdBy: req.user?._id });
-        created++;
-      }
-    }
-    res.json({ success: true, message: `Chart of Accounts verified. ${created} new account(s) initialized.` });
+    const accMap = await getAccountMap();
+    res.json({ success: true, message: `Chart of Accounts verified (${accMap.size} accounts active).` });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -95,13 +550,7 @@ exports.initChartOfAccounts = async (req, res) => {
 
 exports.getAccounts = async (req, res) => {
   try {
-    const count = await Account.countDocuments();
-    if (count === 0) {
-      for (const acc of DEFAULT_ACCOUNTS) {
-        await Account.create({ ...acc, createdBy: req.user?._id });
-      }
-    }
-
+    await getAccountMap();
     const { type, search } = req.query;
     const query = { isActive: true };
     if (type && type !== 'all') query.type = type;
@@ -159,18 +608,25 @@ exports.updateAccount = async (req, res) => {
 };
 
 // ============================================
-// 2. JOURNAL ENTRIES
+// 3. JOURNAL ENTRIES (WITH AUTOMATIC SYNC & DELETE)
 // ============================================
 exports.getJournalEntries = async (req, res) => {
   try {
-    const { page = 1, limit = 25, search, startDate, endDate } = req.query;
+    await syncAllAutomatedJournals();
+
+    const { page = 1, limit = 50, search, sourceModule, startDate, endDate } = req.query;
     const query = {};
+
+    if (sourceModule && sourceModule !== 'all') {
+      query.sourceModule = sourceModule;
+    }
 
     if (search) {
       query.$or = [
         { entryNumber: { $regex: search, $options: 'i' } },
         { referenceNumber: { $regex: search, $options: 'i' } },
-        { memo: { $regex: search, $options: 'i' } }
+        { memo: { $regex: search, $options: 'i' } },
+        { 'lines.accountName': { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -247,15 +703,15 @@ exports.createJournalEntry = async (req, res) => {
     }
 
     const year = new Date().getFullYear();
-    const count = await JournalEntry.countDocuments();
-    const entryNumber = `JV-${year}/${String(count + 1).padStart(4, '0')}`;
+    const count = await JournalEntry.countDocuments({ sourceModule: 'manual' });
+    const entryNumber = `JV-MAN-${year}/${String(count + 1).padStart(4, '0')}`;
 
     const journal = await JournalEntry.create({
       entryNumber,
       date: date ? new Date(date) : new Date(),
       referenceNumber: referenceNumber || '',
       sourceModule: 'manual',
-      memo: memo || 'Manual Journal Adjustment',
+      memo: memo || 'Manual Journal Voucher',
       lines: enrichedLines,
       totalDebit: Math.round(totalDebit * 100) / 100,
       totalCredit: Math.round(totalCredit * 100) / 100,
@@ -264,30 +720,33 @@ exports.createJournalEntry = async (req, res) => {
       createdBy: req.user?._id
     });
 
-    // Update account balances
-    for (const line of enrichedLines) {
-      const acc = await Account.findById(line.account);
-      if (acc) {
-        if (['asset', 'expense'].includes(acc.type)) {
-          acc.balance += (line.debit - line.credit);
-        } else {
-          acc.balance += (line.credit - line.debit);
-        }
-        await acc.save();
-      }
-    }
+    res.status(201).json({ success: true, data: journal, message: `Journal entry ${entryNumber} posted successfully.` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
-    res.status(201).json({ success: true, data: journal, message: `Journal entry ${entryNumber} posted.` });
+// Direct Delete Journal Entry
+exports.deleteJournalEntry = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await JournalEntry.findByIdAndDelete(id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Journal voucher not found' });
+    }
+    res.json({ success: true, message: 'Journal voucher deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ============================================
-// 3. GENERAL LEDGER
+// 4. GENERAL LEDGER
 // ============================================
 exports.getGeneralLedger = async (req, res) => {
   try {
+    await syncAllAutomatedJournals();
+
     const { accountId, startDate, endDate } = req.query;
 
     if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
@@ -323,6 +782,7 @@ exports.getGeneralLedger = async (req, res) => {
           entryNumber: entry.entryNumber,
           referenceNumber: entry.referenceNumber,
           memo: entry.memo,
+          sourceModule: entry.sourceModule,
           description: line.description || entry.memo,
           debit: line.debit,
           credit: line.credit,
@@ -346,10 +806,12 @@ exports.getGeneralLedger = async (req, res) => {
 };
 
 // ============================================
-// 4. TRIAL BALANCE
+// 5. TRIAL BALANCE
 // ============================================
 exports.getTrialBalance = async (req, res) => {
   try {
+    await syncAllAutomatedJournals();
+
     const { asOfDate } = req.query;
     const dateLimit = asOfDate ? new Date(asOfDate) : new Date();
 
@@ -423,7 +885,7 @@ exports.getTrialBalance = async (req, res) => {
 };
 
 // ============================================
-// 5. PROFIT & LOSS STATEMENT (100% REAL DATA)
+// 6. PROFIT & LOSS STATEMENT
 // ============================================
 exports.getProfitLoss = async (req, res) => {
   try {
@@ -455,11 +917,9 @@ exports.getProfitLoss = async (req, res) => {
     invoices.forEach((inv) => {
       const sub = Number(inv.subtotal) || 0;
       const isExport = inv.type === 'international' || (inv.currency && inv.currency !== 'INR');
-      if (isExport) {
-        exportSales += sub;
-      } else {
-        domesticSales += sub;
-      }
+      if (isExport) exportSales += sub;
+      else domesticSales += sub;
+
       freightIncome += Number(inv.freight) || 0;
       insuranceIncome += Number(inv.insurance) || 0;
       totalIncentives += Number(inv.incentive) || 0;
@@ -521,7 +981,7 @@ exports.getProfitLoss = async (req, res) => {
 };
 
 // ============================================
-// 6. BALANCE SHEET (100% REAL DATA)
+// 7. BALANCE SHEET
 // ============================================
 exports.getBalanceSheet = async (req, res) => {
   try {
@@ -535,13 +995,9 @@ exports.getBalanceSheet = async (req, res) => {
       JournalEntry.find({ date: { $lte: dateLimit }, status: 'posted' }).populate('lines.account', 'code name type subType')
     ]);
 
-    // 1. Real Accounts Receivable (unpaid invoices)
     const accountsReceivable = invoices.reduce((sum, inv) => sum + (Number(inv.dueAmount) || 0), 0);
-
-    // 2. Real Accounts Payable (unpaid vendor bills)
     const accountsPayable = purchases.reduce((sum, pi) => sum + (Number(pi.remainingAmount) || 0), 0);
 
-    // 3. Real Collections vs. Disbursements
     const totalCashCollected = invoices.reduce((sum, inv) => sum + (Number(inv.paidAmount) || 0), 0);
     const totalVendorPaid = purchases.reduce((sum, pi) => sum + (Number(pi.paidAmount) || 0), 0);
 
@@ -569,7 +1025,6 @@ exports.getBalanceSheet = async (req, res) => {
     const totalCurrentAssets = cashAndBank + accountsReceivable + inventoryValuation;
     const totalAssets = totalCurrentAssets + Math.max(0, fixedAssetsValuation);
 
-    // Unsettled GST liability: Output GST on Invoices minus Input Tax Credit on Purchases
     const totalOutputGst = invoices.reduce((sum, inv) => sum + (Number(inv.tax) || 0), 0);
     const totalInputGst = purchases.reduce((sum, pi) => sum + (Number(pi.totalTax) || 0), 0);
     const outputGstPayable = Math.max(0, totalOutputGst - totalInputGst);
@@ -577,7 +1032,6 @@ exports.getBalanceSheet = async (req, res) => {
     const totalCurrentLiabilities = accountsPayable + outputGstPayable;
     const totalLiabilities = totalCurrentLiabilities;
 
-    // Retained Earnings derived from Net Balance Sheet Equation
     const ownersEquity = capitalAmount > 0 ? capitalAmount : 500000;
     const retainedEarnings = totalAssets - totalLiabilities - ownersEquity;
     const totalEquity = ownersEquity + retainedEarnings;
@@ -621,14 +1075,16 @@ exports.getBalanceSheet = async (req, res) => {
 };
 
 // ============================================
-// 7. EXECUTIVE ACCOUNTING DASHBOARD
+// 8. EXECUTIVE DASHBOARD SUMMARY
 // ============================================
 exports.getAccountingDashboard = async (req, res) => {
   try {
+    await syncAllAutomatedJournals();
+
     const [invoices, purchases, recentJournals, recentInvoices, liveStockValuation] = await Promise.all([
       Invoice.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }),
       ConsolidatedInvoice.find().sort({ createdAt: -1 }),
-      JournalEntry.find().sort({ date: -1, createdAt: -1 }).limit(6).populate('lines.account', 'code name'),
+      JournalEntry.find().sort({ date: -1, createdAt: -1 }).limit(8).populate('lines.account', 'code name'),
       Invoice.find().sort({ createdAt: -1 }).limit(6),
       getLiveInventoryValuation()
     ]);
@@ -688,7 +1144,7 @@ exports.getAccountingDashboard = async (req, res) => {
 };
 
 // ============================================
-// 8. REAL AGING & GST TAX REPORTS
+// 9. TAX & FINANCIAL AGING REPORTS
 // ============================================
 exports.getTaxAndFinancialReports = async (req, res) => {
   try {
@@ -697,7 +1153,6 @@ exports.getTaxAndFinancialReports = async (req, res) => {
       ConsolidatedInvoice.find()
     ]);
 
-    // GST Calculations
     let outputGst = 0, cgstOutput = 0, sgstOutput = 0, igstOutput = 0;
     invoices.forEach((inv) => {
       const tax = Number(inv.tax) || 0;
@@ -716,58 +1171,34 @@ exports.getTaxAndFinancialReports = async (req, res) => {
       inputGst += Number(pi.totalTax) || 0;
     });
 
-    // Real Accounts Receivable Aging Buckets
     const today = new Date();
-    const receivablesAging = {
-      current: 0,      // 0 - 30 days
-      overdue30: 0,    // 31 - 60 days
-      overdue60: 0,    // 61 - 90 days
-      critical90: 0    // 90+ days
-    };
+    const receivablesAging = { current: 0, overdue30: 0, overdue60: 0, critical90: 0 };
 
     invoices.forEach((inv) => {
       const due = Number(inv.dueAmount) || 0;
       if (due > 0) {
         const invoiceDueDate = inv.dueDate ? new Date(inv.dueDate) : new Date(inv.date);
-        const diffTime = today - invoiceDueDate;
-        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        const diffDays = Math.floor((today - invoiceDueDate) / (1000 * 60 * 60 * 24));
 
-        if (diffDays <= 0 || diffDays <= 30) {
-          receivablesAging.current += due;
-        } else if (diffDays <= 60) {
-          receivablesAging.overdue30 += due;
-        } else if (diffDays <= 90) {
-          receivablesAging.overdue60 += due;
-        } else {
-          receivablesAging.critical90 += due;
-        }
+        if (diffDays <= 0 || diffDays <= 30) receivablesAging.current += due;
+        else if (diffDays <= 60) receivablesAging.overdue30 += due;
+        else if (diffDays <= 90) receivablesAging.overdue60 += due;
+        else receivablesAging.critical90 += due;
       }
     });
 
-    // Real Accounts Payable Aging Buckets
-    const payablesAging = {
-      current: 0,
-      overdue30: 0,
-      overdue60: 0,
-      critical90: 0
-    };
+    const payablesAging = { current: 0, overdue30: 0, overdue60: 0, critical90: 0 };
 
     purchases.forEach((pi) => {
       const due = Number(pi.remainingAmount) || 0;
       if (due > 0) {
         const dueDate = pi.dueDate ? new Date(pi.dueDate) : new Date(pi.invoiceDate || pi.createdAt);
-        const diffTime = today - dueDate;
-        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        const diffDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
 
-        if (diffDays <= 0 || diffDays <= 30) {
-          payablesAging.current += due;
-        } else if (diffDays <= 60) {
-          payablesAging.overdue30 += due;
-        } else if (diffDays <= 90) {
-          payablesAging.overdue60 += due;
-        } else {
-          payablesAging.critical90 += due;
-        }
+        if (diffDays <= 0 || diffDays <= 30) payablesAging.current += due;
+        else if (diffDays <= 60) payablesAging.overdue30 += due;
+        else if (diffDays <= 90) payablesAging.overdue60 += due;
+        else payablesAging.critical90 += due;
       }
     });
 
@@ -785,17 +1216,11 @@ exports.getTaxAndFinancialReports = async (req, res) => {
           }
         },
         receivablesAging: {
-          current: Math.round(receivablesAging.current),
-          overdue30: Math.round(receivablesAging.overdue30),
-          overdue60: Math.round(receivablesAging.overdue60),
-          critical90: Math.round(receivablesAging.critical90),
+          ...receivablesAging,
           total: Math.round(receivablesAging.current + receivablesAging.overdue30 + receivablesAging.overdue60 + receivablesAging.critical90)
         },
         payablesAging: {
-          current: Math.round(payablesAging.current),
-          overdue30: Math.round(payablesAging.overdue30),
-          overdue60: Math.round(payablesAging.overdue60),
-          critical90: Math.round(payablesAging.critical90),
+          ...payablesAging,
           total: Math.round(payablesAging.current + payablesAging.overdue30 + payablesAging.overdue60 + payablesAging.critical90)
         }
       }

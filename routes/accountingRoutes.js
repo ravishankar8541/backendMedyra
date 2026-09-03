@@ -1,6 +1,3 @@
-
-
-
 // routes/accountingRoutes.js
 const express = require('express');
 const router = express.Router();
@@ -12,18 +9,21 @@ const {
   initChartOfAccounts,
   getJournalEntries,
   createJournalEntry,
+  deleteJournalEntry,
   getGeneralLedger,
   getTrialBalance,
   getProfitLoss,
   getBalanceSheet,
   getAccountingDashboard,
-  getTaxAndFinancialReports
+  getTaxAndFinancialReports,
+  syncAutomatedJournals
 } = require('../controllers/accountingController');
 
 router.use(protect);
 
-// Dashboard & Seed
+// Dashboard, Auto-Sync & Seeds
 router.get('/dashboard', getAccountingDashboard);
+router.post('/sync-journals', restrictTo('admin', 'accountant'), syncAutomatedJournals);
 router.post('/init-coa', restrictTo('admin', 'accountant'), initChartOfAccounts);
 
 // Chart of Accounts
@@ -32,12 +32,14 @@ router.route('/accounts')
   .post(restrictTo('admin', 'accountant'), createAccount);
 router.put('/accounts/:id', restrictTo('admin', 'accountant'), updateAccount);
 
-// Journal Entries
+// Journal Entries (Manual + Automated)
 router.route('/journals')
   .get(getJournalEntries)
   .post(restrictTo('admin', 'accountant'), createJournalEntry);
 
-// Financial Statements & Statements
+router.delete('/journals/:id', restrictTo('admin', 'accountant'), deleteJournalEntry);
+
+// Financial Statements
 router.get('/ledger', getGeneralLedger);
 router.get('/trial-balance', getTrialBalance);
 router.get('/pnl', getProfitLoss);
