@@ -453,9 +453,7 @@ exports.updatePurchaseOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Purchase Order not found' });
     }
 
-    if (order.status === 'delivered') {
-      return res.status(400).json({ success: false, message: 'Cannot edit a delivered purchase order' });
-    }
+    // Removed the "delivered" block – now Edit works for all statuses
 
     const { supplier, supplierId, supplierName } = req.body;
 
@@ -472,7 +470,6 @@ exports.updatePurchaseOrder = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 exports.getPurchaseOrders = async (req, res) => {
   try {
     const { page = 1, limit = 10, status, search } = req.query;

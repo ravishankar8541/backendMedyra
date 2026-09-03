@@ -2,54 +2,27 @@
 const express = require('express');
 const router = express.Router();
 const { protect, restrictTo } = require('../middleware/auth');
-const {
-  createGRN,
-  getGRNs,
-  getGRN,
-  deleteGRN,
-  addPayment,
-  generatePurchaseInvoice,
-  getConsolidatedInvoices,
-  getConsolidatedInvoice,
-  addConsolidatedPayment,
-  getReceiptDashboard
-} = require('../controllers/goodsReceiptController');
+const ctrl = require('../controllers/goodsReceiptController');
 
-// All routes protected by JWT auth
 router.use(protect);
 
-// ============================================
-// DASHBOARD
-// ============================================
-router.get('/dashboard', getReceiptDashboard);
+// Dashboard
+router.get('/dashboard', ctrl.getReceiptDashboard);
 
-// ============================================
-// CONSOLIDATED PURCHASE INVOICE (PI) ROUTES
-// ============================================
-router.get('/invoices', getConsolidatedInvoices);
-router.get('/invoices/:invoiceId', getConsolidatedInvoice);
-router.post('/invoices/:invoiceId/payment', restrictTo('admin', 'manager'), addConsolidatedPayment);
+// ========== INVOICE (PI) ROUTES (Registered before /:id) ==========
+router.get('/invoices', ctrl.getConsolidatedInvoices);
+router.get('/invoices/:invoiceId', ctrl.getConsolidatedInvoice);
+router.put('/invoices/:invoiceId', restrictTo('admin', 'manager'), ctrl.updateConsolidatedInvoice);
+router.post('/invoices/:invoiceId/payment', restrictTo('admin', 'manager'), ctrl.addConsolidatedPayment);
+router.delete('/invoices/:invoiceId', restrictTo('admin', 'manager'), ctrl.deleteConsolidatedInvoice);
+router.delete('/invoices', restrictTo('admin', 'manager'), ctrl.deleteConsolidatedInvoice); // Fallback for query param ?id=
 
-// ============================================
-// GRN LIST + CREATE
-// ============================================
-router
-  .route('/')
-  .get(getGRNs)
-  .post(restrictTo('admin', 'manager'), createGRN);
-
-// ============================================
-// SINGLE GRN ACTIONS (PAYMENT & INVOICE GENERATE)
-// ============================================
-router.post('/:id/payment', restrictTo('admin', 'manager'), addPayment);
-router.post('/:id/generate-invoice', restrictTo('admin', 'manager'), generatePurchaseInvoice);
-
-// ============================================
-// SINGLE GRN (GET / DELETE)
-// ============================================
-router
-  .route('/:id')
-  .get(getGRN)
-  .delete(restrictTo('admin'), deleteGRN);
+// ========== GOODS RECEIPT (GRN) ROUTES ==========
+router.get('/', ctrl.getGRNs);
+router.post('/', restrictTo('admin', 'manager'), ctrl.createGRN);
+router.get('/:id', ctrl.getGRN);
+router.put('/:id', restrictTo('admin', 'manager'), ctrl.updateGRN);
+router.delete('/:id', restrictTo('admin', 'manager'), ctrl.deleteGRN);
+router.post('/:id/payment', restrictTo('admin', 'manager'), ctrl.addPayment);
 
 module.exports = router;
