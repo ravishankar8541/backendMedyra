@@ -1,21 +1,9 @@
 // controllers/purchaseOrderController.js
+require('dotenv').config();
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
-
-// ============================================
-// EMAIL TRANSPORTER
-// ============================================
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.EMAIL_PORT) || 587,
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
 
 const isValidObjectId = (id) => {
   if (!id) return false;
@@ -60,7 +48,7 @@ const formatDisplayDate = (dateVal) => {
 };
 
 // =========================================================================
-// 🌐 PURCHASE ORDER ONLINE VIEW (EXACT PRINT PO MATCH)
+// 🌐 PURCHASE ORDER ONLINE PUBLIC VIEW (No Print Button + Fixed Logo)
 // =========================================================================
 exports.getPublicPOView = async (req, res) => {
   try {
@@ -80,6 +68,8 @@ exports.getPublicPOView = async (req, res) => {
       gstin: '07BLQPR8835QZZR',
       email: 'Pharmaceutical@medyra.in',
       phone: '+91 9310879396',
+      contactPerson: 'Miss Ruby Rani',
+      // Use a reliable logo URL (or keep your current one)
       logoUrl: 'https://medyra-frontend-new-cwlc.vercel.app/medyraWhiteLogo.png'
     };
 
@@ -117,7 +107,6 @@ exports.getPublicPOView = async (req, res) => {
     const roundOff = isInternational ? 0 : Number((grandTotal - exactTotalBeforeRound).toFixed(2));
     const totalInWords = `${currency === 'INR' ? 'Indian Rupee' : currency} ${numberToWords(isInternational ? Math.floor(grandTotal) : Math.round(grandTotal))} Only`;
 
-    // ⭐ Tax label in brackets
     const taxTypeLabel = order.gstType === 'cgst_sgst' ? 'CGST + SGST' : 'IGST';
 
     let rowIndex = 0;
@@ -205,7 +194,7 @@ exports.getPublicPOView = async (req, res) => {
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; padding: 25px; font-size: 11px; color: #0f172a; line-height: 1.4; }
     .po-container { max-width: 210mm; margin: 0 auto; background: #ffffff; padding: 32px; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
     .header-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-    .logo-box { width: 160px; height: 80px; background-color: #000000 !important; border-radius: 8px; padding: 6px; display: flex; align-items: center; justify-content: center; }
+    .logo-box { width: 160px; height: 80px; background-color: #000000 !important; border-radius: 8px; padding: 6px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
     .logo-img { width: 100%; height: 100%; object-fit: contain; }
     .po-title { font-size: 20px; font-weight: 900; color: #000000; text-transform: uppercase; }
     .solid-divider { width: 100%; height: 2px; background: #000000; margin: 12px 0; }
@@ -219,26 +208,25 @@ exports.getPublicPOView = async (req, res) => {
     .totals-box { border-top: 2px solid #000000; padding-top: 8px; font-size: 11px; }
     .total-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #e2e8f0; }
     .total-row.final { border-bottom: none; margin-top: 6px; padding: 8px 10px; border: 2px solid #000000; font-weight: 900; font-size: 14px; }
-    .print-bar { max-width: 210mm; margin: 0 auto 16px auto; display: flex; justify-content: flex-end; }
-    .print-btn { background: #013A59; color: #fff; border: none; padding: 8px 16px; font-weight: 700; border-radius: 6px; cursor: pointer; }
     @media print {
       body { background: #fff; padding: 0; }
-      .print-bar { display: none; }
       .po-container { border: none; box-shadow: none; padding: 0; max-width: 100%; }
       .logo-box { background-color: #000000 !important; }
     }
   </style>
 </head>
 <body>
-  <div class="print-bar">
-    <button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
-  </div>
   <div class="po-container">
     <table class="header-table">
       <tr>
         <td style="vertical-align:top; width:60%;">
           <div class="logo-box" style="margin-bottom:8px;">
-            <img src="${company.logoUrl}" class="logo-img" alt="Medyra" onerror="this.style.display='none';this.parentElement.innerHTML='<span style=\\'color:#fff;font-weight:900;font-size:16px;\\'>MEDYRA</span>'"/>
+            <img 
+              src="${company.logoUrl}" 
+              class="logo-img" 
+              alt="Medyra" 
+              onerror="this.style.display='none'; this.parentElement.innerHTML='<span style=\\'color:#ffffff;font-weight:900;font-size:22px;letter-spacing:1px;\\'>MEDYRA</span>';"
+            />
           </div>
           <div style="font-size:10px; color:#334155;">
             <p style="font-weight:800;font-size:11px;">${company.name}</p>
@@ -249,9 +237,10 @@ exports.getPublicPOView = async (req, res) => {
         </td>
         <td style="vertical-align:top; text-align:right; width:40%;">
           <div class="po-title">PURCHASE ORDER</div>
-          <p style="font-weight:800;margin-top:4px;">PO Number: ${order.poNumber}</p>
+          <p style="font-weight:800;margin-top:4px;">PO Number: <span style="font-family:monospace;">${order.poNumber}</span></p>
           <p style="font-weight:700;">Date: ${createdDate}</p>
           <p style="font-weight:700;">Currency: ${currency}</p>
+          <p style="font-weight:700;margin-top:2px;">Purchaser: <strong>${order.purchaserName || company.contactPerson}</strong></p>
         </td>
       </tr>
     </table>
@@ -326,12 +315,13 @@ exports.getPublicPOView = async (req, res) => {
 };
 
 // ============================================
-// SEND PO VIA EMAIL
+// SEND PO VIA EMAIL  (FULLY FIXED)
 // ============================================
 exports.sendPOEmail = async (req, res) => {
   try {
     let emailData = req.body;
 
+    // Support both plain JSON body and FormData with "emailData" field
     if (req.body.emailData) {
       if (typeof req.body.emailData === 'string') {
         try {
@@ -353,8 +343,9 @@ exports.sendPOEmail = async (req, res) => {
       });
     }
 
+    // Attach PDF only when a real file was uploaded
     const attachments = [];
-    if (req.file) {
+    if (req.file && req.file.buffer) {
       attachments.push({
         filename: req.file.originalname || `PO-${poNumber || 'document'}.pdf`,
         content: req.file.buffer,
@@ -362,7 +353,11 @@ exports.sendPOEmail = async (req, res) => {
       });
     }
 
-    const mailHtml = html || (body ? body.replace(/\n/g, '<br/>') : `
+    const mailHtml =
+      html ||
+      (body
+        ? body.replace(/\n/g, '<br/>')
+        : `
       <div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">
         <p>Dear Sir/Madam,</p>
         <p>Please find attached our official Purchase Order <strong>#${poNumber || ''}</strong>.</p>
@@ -370,15 +365,57 @@ exports.sendPOEmail = async (req, res) => {
       </div>
     `);
 
-    await transporter.sendMail({
-      from: `"Medyra Pharmaceutical" <${process.env.EMAIL_USER}>`,
+    const mailUser = (process.env.EMAIL_USER || '').trim();
+    const mailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
+
+    if (!mailUser || !mailPass) {
+      return res.status(500).json({
+        success: false,
+        error: 'EMAIL_USER / EMAIL_PASS not configured on server'
+      });
+    }
+
+    // Clean CC (ignore dummy values)
+    const validCc =
+      cc &&
+      typeof cc === 'string' &&
+      cc.trim().length > 3 &&
+      cc.includes('@') &&
+      !cc.includes('example.com') &&
+      !cc.includes('medyra.in')
+        ? cc.trim()
+        : undefined;
+
+    // Reliable Gmail transporter
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,               // true for port 465
+      auth: {
+        user: mailUser,
+        pass: mailPass
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000,
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+
+    // Verify SMTP connection first (clear error if credentials are wrong)
+    await transporter.verify();
+
+    const info = await transporter.sendMail({
+      from: `"Medyra Pharmaceutical" <${mailUser}>`,
       to: to.trim(),
-      cc: cc && cc.trim() ? cc.trim() : undefined,
+      cc: validCc,
       subject: subject || `Purchase Order #${poNumber || ''} - Medyra Pharmaceutical`,
       html: mailHtml,
       attachments
     });
 
+    // Mark the PO as emailed
     if (poNumber) {
       await PurchaseOrder.findOneAndUpdate(
         { poNumber },
@@ -391,19 +428,22 @@ exports.sendPOEmail = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: `Email successfully sent to ${to.trim()}`
+      message: `Email successfully sent to ${to.trim()}`,
+      messageId: info.messageId
     });
   } catch (error) {
     console.error('❌ Send Email Error:', error);
+
     return res.status(500).json({
       success: false,
-      error: error.message || 'Failed to send email'
+      error: error.message || 'SMTP connection / authentication failed',
+      code: error.code || null
     });
   }
 };
 
 // ============================================
-// CREATE PURCHASE ORDER
+// CRUD METHODS
 // ============================================
 exports.createPurchaseOrder = async (req, res) => {
   try {
@@ -438,9 +478,6 @@ exports.createPurchaseOrder = async (req, res) => {
   }
 };
 
-// ============================================
-// UPDATE PURCHASE ORDER (FULL EDIT)
-// ============================================
 exports.updatePurchaseOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -452,8 +489,6 @@ exports.updatePurchaseOrder = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: 'Purchase Order not found' });
     }
-
-    // Removed the "delivered" block – now Edit works for all statuses
 
     const { supplier, supplierId, supplierName } = req.body;
 
@@ -470,6 +505,7 @@ exports.updatePurchaseOrder = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 exports.getPurchaseOrders = async (req, res) => {
   try {
     const { page = 1, limit = 10, status, search } = req.query;

@@ -21,3 +21,13 @@ router.delete('/supplier/:supplierId/item/:itemId', restrictTo('admin', 'manager
 router.delete('/supplier/:supplierId', restrictTo('admin'), deletePriceList);
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+

@@ -19,7 +19,7 @@ router.post('/send-email', upload.single('pdf'), purchaseOrderController.sendPOE
 router.post('/', purchaseOrderController.createPurchaseOrder);
 router.get('/', purchaseOrderController.getPurchaseOrders);
 router.get('/:id', purchaseOrderController.getPurchaseOrder);
-router.put('/:id', purchaseOrderController.updatePurchaseOrder); // ✏️ Full Edit PO
+router.put('/:id', purchaseOrderController.updatePurchaseOrder);
 router.put('/:id/status', purchaseOrderController.updatePurchaseOrderStatus);
 router.delete('/:id', purchaseOrderController.deletePurchaseOrder);
 

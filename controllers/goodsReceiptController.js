@@ -1293,3 +1293,110 @@ exports.getReceiptDashboard = async (req, res) => {
   }
 };
 
+// ============================================
+// SEND PURCHASE INVOICE VIA EMAIL
+// ============================================
+exports.sendPurchaseInvoiceEmail = async (req, res) => {
+  try {
+    let emailData = req.body;
+
+    if (req.body.emailData) {
+      if (typeof req.body.emailData === 'string') {
+        try {
+          emailData = JSON.parse(req.body.emailData);
+        } catch (e) {
+          emailData = req.body;
+        }
+      } else {
+        emailData = req.body.emailData;
+      }
+    }
+
+    const { to, cc, subject, body, html, invoiceNumber } = emailData;
+
+    if (!to || !to.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Recipient email is required'
+      });
+    }
+
+    const attachments = [];
+    if (req.file && req.file.buffer) {
+      attachments.push({
+        filename: req.file.originalname || `PI-${invoiceNumber || 'document'}.pdf`,
+        content: req.file.buffer,
+        contentType: 'application/pdf'
+      });
+    }
+
+    const mailHtml =
+      html ||
+      (body
+        ? body.replace(/\n/g, '<br/>')
+        : `
+      <div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">
+        <p>Dear Sir/Madam,</p>
+        <p>Please find attached our Purchase Invoice <strong>#${invoiceNumber || ''}</strong>.</p>
+        <p>Thank you,<br/>Medyra Pharmaceutical</p>
+      </div>
+    `);
+
+    const mailUser = (process.env.EMAIL_USER || '').trim();
+    const mailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
+
+    if (!mailUser || !mailPass) {
+      return res.status(500).json({
+        success: false,
+        error: 'EMAIL_USER / EMAIL_PASS not configured'
+      });
+    }
+
+    const validCc =
+      cc &&
+      typeof cc === 'string' &&
+      cc.trim().length > 3 &&
+      cc.includes('@') &&
+      !cc.includes('example.com')
+        ? cc.trim()
+        : undefined;
+
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: {
+        user: mailUser,
+        pass: mailPass
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000,
+      tls: { rejectUnauthorized: false }
+    });
+
+    await transporter.verify();
+
+    const info = await transporter.sendMail({
+      from: `"Medyra Pharmaceutical" <${mailUser}>`,
+      to: to.trim(),
+      cc: validCc,
+      subject: subject || `Purchase Invoice #${invoiceNumber || ''} - Medyra Pharmaceutical`,
+      html: mailHtml,
+      attachments
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Email successfully sent to ${to.trim()}`,
+      messageId: info.messageId
+    });
+  } catch (error) {
+    console.error('❌ Send Purchase Invoice Email Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to send email',
+      code: error.code || null
+    });
+  }
+};

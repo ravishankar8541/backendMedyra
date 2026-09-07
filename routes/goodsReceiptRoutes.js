@@ -1,6 +1,9 @@
 // routes/goodsReceiptRoutes.js
 const express = require('express');
 const router = express.Router();
+const multer = require('multer'); // 1. Import multer
+const upload = multer({ storage: multer.memoryStorage() }); // 2. Define upload middleware
+
 const { protect, restrictTo } = require('../middleware/auth');
 const ctrl = require('../controllers/goodsReceiptController');
 
@@ -15,7 +18,15 @@ router.get('/invoices/:invoiceId', ctrl.getConsolidatedInvoice);
 router.put('/invoices/:invoiceId', restrictTo('admin', 'manager'), ctrl.updateConsolidatedInvoice);
 router.post('/invoices/:invoiceId/payment', restrictTo('admin', 'manager'), ctrl.addConsolidatedPayment);
 router.delete('/invoices/:invoiceId', restrictTo('admin', 'manager'), ctrl.deleteConsolidatedInvoice);
-router.delete('/invoices', restrictTo('admin', 'manager'), ctrl.deleteConsolidatedInvoice); // Fallback for query param ?id=
+router.delete('/invoices', restrictTo('admin', 'manager'), ctrl.deleteConsolidatedInvoice);
+
+// Send Purchase Invoice Email
+router.post(
+  '/invoices/send-email',
+  upload.single('pdf'),
+  restrictTo('admin', 'manager'),
+  ctrl.sendPurchaseInvoiceEmail
+);
 
 // ========== GOODS RECEIPT (GRN) ROUTES ==========
 router.get('/', ctrl.getGRNs);
