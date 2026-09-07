@@ -1,3 +1,5 @@
+
+
 // controllers/goodsReceiptController.js
 const mongoose = require('mongoose');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
@@ -51,7 +53,7 @@ const generateConsolidatedInvoiceNumber = async () => {
 };
 
 // ============================================
-// CREATE OR UPDATE GRN (Consolidate into 1 GRN per PO)
+// CREATE GRN
 // ============================================
 exports.createGRN = async (req, res) => {
   try {
@@ -93,7 +95,6 @@ exports.createGRN = async (req, res) => {
       });
     }
 
-    // Accurate supplier resolution
     let finalSupplierName = (supplierName && supplierName.trim() !== '' && supplierName !== 'N/A') ? supplierName.trim() : '';
     if (!finalSupplierName && po) {
       finalSupplierName = po.supplierName || po.supplier?.companyName || po.supplier?.name || '';
@@ -120,7 +121,7 @@ exports.createGRN = async (req, res) => {
     const isFirstReceipt = !existingGRN;
 
     let subtotal = 0;
-    let totalTax = 0;
+    let itemsTax = 0;
     const processedItems = [];
 
     for (const item of items) {
@@ -155,7 +156,7 @@ exports.createGRN = async (req, res) => {
       const itemTax = itemSubtotal * (taxRate / 100);
 
       subtotal += itemSubtotal;
-      totalTax += itemTax;
+      itemsTax += itemTax;
 
       const userMfgDate = item.mfgDate || '';
       const userExpDate = item.expDate || '';
@@ -305,8 +306,9 @@ exports.createGRN = async (req, res) => {
       const chargesSubtotal = freightData.amount + insuranceData.amount + inventoryData.amount;
       const chargesTax = freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
 
-      // Exact total calculation (matches Purchase Order)
-      const exactTotal = subtotal + totalTax + chargesSubtotal;
+      // ✅ 100% Exact PO match (Includes both items tax and charges tax)
+      const totalTax = itemsTax + chargesTax;
+      const exactTotal = subtotal + chargesSubtotal + totalTax;
       const isInternational = poCurrency && poCurrency !== 'INR';
       const grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
       const roundOff = isInternational ? 0 : Number((grandTotal - exactTotal).toFixed(2));
@@ -377,18 +379,21 @@ exports.createGRN = async (req, res) => {
       });
 
       let newSubtotal = 0;
-      let newTotalTax = 0;
+      let newItemsTax = 0;
       mergedItems.forEach(item => {
         newSubtotal += (item.subtotal || 0);
-        newTotalTax += (item.tax || 0);
+        newItemsTax += (item.tax || 0);
       });
+
+      const cSub = Number(grn.chargesSubtotal || 0);
+      const cTax = Number(grn.chargesTax || 0);
+      const newTotalTax = newItemsTax + cTax;
 
       grn.items = mergedItems;
       grn.subtotal = newSubtotal;
       grn.totalTax = newTotalTax;
 
-      // FIX: chargesTax is NOT added to grand total (matches PO exactly)
-      const exactTotal = newSubtotal + newTotalTax + (grn.chargesSubtotal || 0);
+      const exactTotal = newSubtotal + cSub + newTotalTax;
       const curr = grn.currency || poCurrency;
       const isInternational = curr && curr !== 'INR';
       grn.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
@@ -521,7 +526,7 @@ exports.createGRN = async (req, res) => {
 };
 
 // ============================================
-// UPDATE GRN (FULL EDIT - EXACT MIRROR OF CREATE)
+// UPDATE GRN (FULL EDIT - WITH STOCK, CHARGES & PO RE-SYNC)
 // ============================================
 exports.updateGRN = async (req, res) => {
   try {
@@ -568,7 +573,7 @@ exports.updateGRN = async (req, res) => {
     // Items & Stock Adjustments
     if (Array.isArray(items)) {
       let newSubtotal = 0;
-      let newTotalTax = 0;
+      let newItemsTax = 0;
 
       for (const upd of items) {
         const grnItem = grn.items.id(upd._id) || grn.items.find(i => String(i._id) === String(upd._id));
@@ -635,12 +640,12 @@ exports.updateGRN = async (req, res) => {
         grnItem.totalWithTax = lineTotal + lineTax;
 
         newSubtotal += lineTotal;
-        newTotalTax += lineTax;
+        newItemsTax += lineTax;
       }
 
       grn.markModified('items');
       grn.subtotal = newSubtotal;
-      grn.totalTax = newTotalTax;
+      grn.totalTax = newItemsTax;
     }
 
     const cSub =
@@ -655,34 +660,69 @@ exports.updateGRN = async (req, res) => {
     grn.chargesSubtotal = cSub;
     grn.chargesTax = cTax;
 
-    // Strict alignment with PO: chargesTax is not added to grand total
-    const exactTotal = (Number(grn.subtotal) || 0) + (Number(grn.totalTax) || 0) + cSub;
+    // ✅ Combine items tax + charges tax for true total
+    const totalTaxCombined = (Number(grn.totalTax) || 0) + cTax;
+    grn.totalTax = totalTaxCombined;
+
+    const exactTotal = (Number(grn.subtotal) || 0) + cSub + totalTaxCombined;
     const isInternational = grn.currency && grn.currency !== 'INR';
     grn.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
     grn.roundOff = isInternational ? 0 : Number((grn.grandTotal - exactTotal).toFixed(2));
 
     await grn.save();
 
-    // Sync Consolidated Invoice (PI)
-    if (grn.consolidatedInvoiceId) {
-      const inv = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
-      if (inv) {
-        if (notes !== undefined) inv.notes = notes;
-        if (receivedDate !== undefined) inv.invoiceDate = receivedDate;
-        inv.subtotal = grn.subtotal;
-        inv.totalTax = grn.totalTax;
-        inv.chargesSubtotal = grn.chargesSubtotal;
-        inv.chargesTax = grn.chargesTax;
-        inv.roundOff = grn.roundOff;
-        inv.grandTotal = grn.grandTotal;
-        inv.freight = grn.freight;
-        inv.insurance = grn.insurance;
-        inv.inventoryCharges = grn.inventoryCharges;
-        inv.items = grn.items;
-        inv.remainingAmount = Math.max(0, inv.grandTotal - (Number(inv.paidAmount) || 0));
-        inv.paymentStatus = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : (inv.paidAmount > 0 ? 'partial' : 'pending');
-        await inv.save();
+    // Re-sync Purchase Order status
+    if (grn.purchaseOrder) {
+      const po = await PurchaseOrder.findById(grn.purchaseOrder);
+      if (po) {
+        let totalOrdered = 0;
+        let totalReceived = 0;
+        po.items.forEach((poItem) => {
+          totalOrdered += Number(poItem.quantity) || 0;
+          const matched = grn.items.find(gi => String(gi.productId) === String(poItem.productId || poItem.product));
+          if (matched) {
+            poItem.receivedQty = Number(matched.receivedQty) || 0;
+            poItem.remainingQty = Math.max(0, (Number(poItem.quantity) || 0) - (Number(matched.receivedQty) || 0));
+          }
+          totalReceived += Number(poItem.receivedQty) || 0;
+        });
+        po.receivedPercentage = totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0;
+        po.partiallyReceived = totalReceived > 0 && totalReceived < totalOrdered;
+        if (totalReceived >= totalOrdered) {
+          po.status = 'delivered';
+        } else if (totalReceived > 0) {
+          po.status = 'partially_received';
+        }
+        po.markModified('items');
+        await po.save();
       }
+    }
+
+    // Sync Consolidated Invoice (PI)
+    let inv = null;
+    if (grn.consolidatedInvoiceId) {
+      inv = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+    }
+    if (!inv && grn.purchaseOrder) {
+      inv = await ConsolidatedInvoice.findOne({ purchaseOrder: grn.purchaseOrder });
+    }
+
+    if (inv) {
+      if (notes !== undefined) inv.notes = notes;
+      if (receivedDate !== undefined) inv.invoiceDate = receivedDate;
+      inv.subtotal = grn.subtotal;
+      inv.totalTax = grn.totalTax;
+      inv.chargesSubtotal = grn.chargesSubtotal;
+      inv.chargesTax = grn.chargesTax;
+      inv.roundOff = grn.roundOff;
+      inv.grandTotal = grn.grandTotal;
+      inv.freight = grn.freight;
+      inv.insurance = grn.insurance;
+      inv.inventoryCharges = grn.inventoryCharges;
+      inv.items = grn.items;
+      inv.remainingAmount = Math.max(0, inv.grandTotal - (Number(inv.paidAmount) || 0));
+      inv.paymentStatus = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : (inv.paidAmount > 0 ? 'partial' : 'pending');
+      await inv.save();
     }
 
     res.json({
@@ -697,7 +737,152 @@ exports.updateGRN = async (req, res) => {
 };
 
 // ============================================
-// DELETE PURCHASE INVOICE (HANDLES MULTIPLE PARAM SHAPES)
+// UPDATE PURCHASE INVOICE (FULL EDIT CONTROL)
+// ============================================
+exports.updateConsolidatedInvoice = async (req, res) => {
+  try {
+    const invoice = await ConsolidatedInvoice.findById(req.params.invoiceId);
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
+    }
+
+    const {
+      dueDate,
+      notes,
+      invoiceDate,
+      paymentTerms,
+      supplierGST,
+      supplierContact,
+      supplierAddress,
+      items,
+      freight,
+      insurance,
+      inventoryCharges,
+      gstType
+    } = req.body;
+
+    if (dueDate !== undefined) invoice.dueDate = dueDate;
+    if (notes !== undefined) invoice.notes = notes;
+    if (invoiceDate !== undefined) invoice.invoiceDate = invoiceDate;
+    if (paymentTerms !== undefined) invoice.paymentTerms = paymentTerms;
+    if (supplierGST !== undefined) invoice.supplierGST = supplierGST;
+    if (supplierContact !== undefined) invoice.supplierContact = supplierContact;
+    if (supplierAddress !== undefined) invoice.supplierAddress = supplierAddress;
+    if (gstType !== undefined) invoice.gstType = gstType;
+
+    // Full Items update
+    if (Array.isArray(items)) {
+      let newSubtotal = 0;
+      let newItemsTax = 0;
+
+      invoice.items = items.map(upd => {
+        const qty = Number(upd.acceptedQty ?? upd.receivedQty ?? upd.quantity) || 0;
+        const rate = Number(upd.unitPrice ?? upd.rate) || 0;
+        const taxRate = Number(upd.taxRate) || 0;
+        const lineTotal = qty * rate;
+        const lineTax = (lineTotal * taxRate) / 100;
+
+        newSubtotal += lineTotal;
+        newItemsTax += lineTax;
+
+        return {
+          productId: upd.productId,
+          productName: upd.productName,
+          sku: upd.sku || '',
+          hsn: upd.hsn || '',
+          unit: upd.unit || 'Strips',
+          orderedQty: Number(upd.orderedQty) || qty,
+          alreadyReceived: Number(upd.alreadyReceived) || 0,
+          receivedQty: qty,
+          acceptedQty: qty,
+          rejectedQty: 0,
+          remainingQty: 0,
+          batchNumber: upd.batchNumber || 'N/A',
+          mfgDate: upd.mfgDate || '',
+          expDate: upd.expDate || '',
+          unitPrice: rate,
+          taxRate,
+          subtotal: lineTotal,
+          tax: lineTax,
+          totalWithTax: lineTotal + lineTax
+        };
+      });
+
+      invoice.subtotal = newSubtotal;
+      invoice.totalTax = newItemsTax;
+    }
+
+    // Charges
+    if (freight) {
+      const amt = Number(freight.amount) || 0;
+      const rate = Number(freight.taxRate) || 0;
+      invoice.freight = { amount: amt, taxRate: rate, taxAmount: (amt * rate) / 100 };
+    }
+    if (insurance) {
+      const amt = Number(insurance.amount) || 0;
+      const rate = Number(insurance.taxRate) || 0;
+      invoice.insurance = { amount: amt, taxRate: rate, taxAmount: (amt * rate) / 100 };
+    }
+    if (inventoryCharges) {
+      const amt = Number(inventoryCharges.amount) || 0;
+      const rate = Number(inventoryCharges.taxRate) || 0;
+      invoice.inventoryCharges = { amount: amt, taxRate: rate, taxAmount: (amt * rate) / 100 };
+    }
+
+    const cSub =
+      (Number(invoice.freight?.amount) || 0) +
+      (Number(invoice.insurance?.amount) || 0) +
+      (Number(invoice.inventoryCharges?.amount) || 0);
+    const cTax =
+      (Number(invoice.freight?.taxAmount) || 0) +
+      (Number(invoice.insurance?.taxAmount) || 0) +
+      (Number(invoice.inventoryCharges?.taxAmount) || 0);
+
+    invoice.chargesSubtotal = cSub;
+    invoice.chargesTax = cTax;
+    invoice.totalTax = (Number(invoice.totalTax) || 0) + cTax;
+
+    const exactTotal = (Number(invoice.subtotal) || 0) + cSub + invoice.totalTax;
+    const isInternational = invoice.currency && invoice.currency !== 'INR';
+    invoice.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
+    invoice.roundOff = isInternational ? 0 : Number((invoice.grandTotal - exactTotal).toFixed(2));
+
+    invoice.remainingAmount = Math.max(0, invoice.grandTotal - (Number(invoice.paidAmount) || 0));
+    invoice.paymentStatus = (invoice.paidAmount || 0) >= invoice.grandTotal ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
+
+    await invoice.save();
+
+    // Also sync the Goods Receipt
+    if (invoice.grnIds && invoice.grnIds.length > 0) {
+      const grn = await GoodsReceipt.findById(invoice.grnIds[0]);
+      if (grn) {
+        grn.subtotal = invoice.subtotal;
+        grn.totalTax = invoice.totalTax;
+        grn.chargesSubtotal = invoice.chargesSubtotal;
+        grn.chargesTax = invoice.chargesTax;
+        grn.roundOff = invoice.roundOff;
+        grn.grandTotal = invoice.grandTotal;
+        grn.freight = invoice.freight;
+        grn.insurance = invoice.insurance;
+        grn.inventoryCharges = invoice.inventoryCharges;
+        grn.items = invoice.items;
+        await grn.save();
+      }
+    }
+
+    res.json({
+      success: true,
+      data: invoice,
+      message: `Invoice ${invoice.invoiceNumber} fully updated successfully`
+    });
+  } catch (error) {
+    console.error('❌ Update consolidated invoice error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============================================
+// DELETE PURCHASE INVOICE
 // ============================================
 exports.deleteConsolidatedInvoice = async (req, res) => {
   try {
@@ -788,7 +973,9 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
   }
 };
 
-// Payment, Queries, and CRUD functions
+// ============================================
+// ADD PAYMENT
+// ============================================
 exports.addPayment = async (req, res) => {
   try {
     const id = req.params.id || req.params.grnId || req.params.invoiceId;
@@ -855,30 +1042,6 @@ exports.addPayment = async (req, res) => {
 };
 
 exports.addConsolidatedPayment = exports.addPayment;
-
-exports.updateConsolidatedInvoice = async (req, res) => {
-  try {
-    const invoice = await ConsolidatedInvoice.findById(req.params.invoiceId);
-    if (!invoice) {
-      return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
-    }
-
-    const { dueDate, notes, invoiceDate, paymentTerms, supplierGST, supplierContact, supplierAddress } = req.body;
-    if (dueDate !== undefined) invoice.dueDate = dueDate;
-    if (notes !== undefined) invoice.notes = notes;
-    if (invoiceDate !== undefined) invoice.invoiceDate = invoiceDate;
-    if (paymentTerms !== undefined) invoice.paymentTerms = paymentTerms;
-    if (supplierGST !== undefined) invoice.supplierGST = supplierGST;
-    if (supplierContact !== undefined) invoice.supplierContact = supplierContact;
-    if (supplierAddress !== undefined) invoice.supplierAddress = supplierAddress;
-
-    await invoice.save();
-    res.json({ success: true, data: invoice, message: `Invoice ${invoice.invoiceNumber} updated successfully` });
-  } catch (error) {
-    console.error('❌ Update consolidated invoice error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
 
 exports.getConsolidatedInvoices = async (req, res) => {
   try {
@@ -1130,6 +1293,3 @@ exports.getReceiptDashboard = async (req, res) => {
   }
 };
 
-exports.generatePurchaseInvoice = async (req, res) => {
-  res.status(400).json({ success: false, message: 'Use consolidated invoice system instead' });
-};

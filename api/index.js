@@ -51,7 +51,7 @@ const app = express();
 dbConnection();
 
 app.use(cors({
-  origin: ['https://medyra-frontend-2-sept.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:3000'],
+  origin: ['https://medyra-frontend-2-sept.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:5175', 'http://localhost:3000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -190,3 +190,5 @@ const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
+

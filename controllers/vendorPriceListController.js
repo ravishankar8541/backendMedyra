@@ -1,3 +1,4 @@
+// controllers/vendorPriceListController.js
 const VendorPriceList = require('../models/VendorPriceList');
 const Product = require('../models/Product');
 const Supplier = require('../models/Supplier');
@@ -23,9 +24,10 @@ exports.getPriceLists = async (req, res) => {
       ];
     }
 
+    // ✅ batches populated so front-end has all available batches
     const lists = await VendorPriceList.find(query)
-      .populate('supplierId', 'companyName email phone')
-      .populate('items.productId', 'name sku unit productType pricing stock status')
+      .populate('supplierId', 'companyName email phone currency')
+      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory hsnCode')
       .sort({ updatedAt: -1 });
 
     res.json({ success: true, data: lists });
@@ -44,6 +46,7 @@ exports.getPriceListBySupplier = async (req, res) => {
     }
 
     const list = await VendorPriceList.findOne({ supplierId, status: 'active' })
+      .populate('supplierId', 'companyName email phone currency')
       .populate('items.productId', 'name sku unit productType pricing stock status batches hsnCode category subCategory');
 
     if (!list) {
@@ -74,8 +77,12 @@ exports.upsertPriceList = async (req, res) => {
     // Sanitize & enrich items from Product
     const cleanItems = [];
     for (const raw of items) {
-      if (!isValidId(raw.productId)) continue;
-      const product = await Product.findById(raw.productId);
+      const rawPid = typeof raw.productId === 'object' && raw.productId !== null
+        ? (raw.productId._id || raw.productId.id)
+        : raw.productId;
+
+      if (!isValidId(rawPid)) continue;
+      const product = await Product.findById(rawPid);
       if (!product) continue;
 
       const costPrice = parseFloat(raw.costPrice);
@@ -83,19 +90,46 @@ exports.upsertPriceList = async (req, res) => {
 
       const defaultQty = Math.max(1, parseInt(raw.defaultQty) || 1);
       const unit = (raw.unit || product.unit || 'Pcs').trim();
+      const batchNo = (raw.batchNumber || '').trim();
+      const isBatch = (product.productType || 'batch') !== 'non-batch';
 
-    cleanItems.push({
-  productId: product._id,
-  productName: product.name || '',
-  sku: product.sku || '',
-  hsn: product.hsnCode || '',
-  unit,
-  costPrice,
-  defaultQty,
-  batchNumber: (raw.batchNumber || '').trim(),
-  isBatchProduct: (product.productType || 'batch') !== 'non-batch',
-  notes: (raw.notes || '').trim()
-});
+      // ✅ AUTO-REGISTER NEW BATCH IN PRODUCT INVENTORY
+      if (isBatch && batchNo && batchNo !== 'N/A') {
+        if (!Array.isArray(product.batches)) product.batches = [];
+        const batchExists = product.batches.some(
+          (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
+        );
+
+        if (!batchExists) {
+          product.batches.push({
+            batchNumber: batchNo,
+            quantity: 0,
+            costPrice: costPrice,
+            mrp: product.pricing?.mrp || 0,
+            sellingPrice: product.pricing?.sellingPrice || 0,
+            supplierName: supplier.companyName || '',
+            supplier: supplier._id,
+            addedDate: new Date().toISOString().split('T')[0],
+            addedBy: req.user?.name || 'Vendor Price List',
+            reason: `Registered via Vendor Price List (${supplier.companyName})`
+          });
+          product.markModified('batches');
+          await product.save();
+        }
+      }
+
+      cleanItems.push({
+        productId: product._id,
+        productName: product.name || '',
+        sku: product.sku || '',
+        hsn: product.hsnCode || '',
+        unit,
+        costPrice,
+        defaultQty,
+        batchNumber: batchNo,
+        isBatchProduct: isBatch,
+        notes: (raw.notes || '').trim()
+      });
     }
 
     const payload = {
@@ -117,13 +151,13 @@ exports.upsertPriceList = async (req, res) => {
     }
 
     const populated = await VendorPriceList.findById(list._id)
-      .populate('supplierId', 'companyName email phone')
-      .populate('items.productId', 'name sku unit productType pricing stock status');
+      .populate('supplierId', 'companyName email phone currency')
+      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory');
 
     res.json({
       success: true,
       data: populated,
-      message: `Price list saved (${cleanItems.length} products)`
+      message: `Price list saved (${cleanItems.length} products & batches updated)`
     });
   } catch (err) {
     console.error('upsertPriceList error:', err);
@@ -135,9 +169,13 @@ exports.upsertPriceList = async (req, res) => {
 exports.upsertItem = async (req, res) => {
   try {
     const { supplierId } = req.params;
-    const { productId, costPrice, defaultQty, unit, notes } = req.body;
+    const { productId, costPrice, defaultQty, unit, notes, batchNumber } = req.body;
 
-    if (!isValidId(supplierId) || !isValidId(productId)) {
+    const rawPid = typeof productId === 'object' && productId !== null
+      ? (productId._id || productId.id)
+      : productId;
+
+    if (!isValidId(supplierId) || !isValidId(rawPid)) {
       return res.status(400).json({ success: false, message: 'supplierId & productId required' });
     }
 
@@ -146,9 +184,33 @@ exports.upsertItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Valid costPrice required' });
     }
 
-    const product = await Product.findById(productId);
+    const product = await Product.findById(rawPid);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    const batchNo = (batchNumber || '').trim();
+    const isBatch = (product.productType || 'batch') !== 'non-batch';
+
+    // Register batch if new
+    if (isBatch && batchNo && batchNo !== 'N/A') {
+      if (!Array.isArray(product.batches)) product.batches = [];
+      const batchExists = product.batches.some(
+        (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
+      );
+
+      if (!batchExists) {
+        product.batches.push({
+          batchNumber: batchNo,
+          quantity: 0,
+          costPrice: price,
+          addedDate: new Date().toISOString().split('T')[0],
+          addedBy: req.user?.name || 'Vendor Price List',
+          reason: `Item batch registered via Price List`
+        });
+        product.markModified('batches');
+        await product.save();
+      }
     }
 
     let list = await VendorPriceList.findOne({ supplierId });
@@ -166,7 +228,7 @@ exports.upsertItem = async (req, res) => {
     }
 
     const idx = list.items.findIndex(
-      (i) => i.productId && i.productId.toString() === productId.toString()
+      (i) => i.productId && i.productId.toString() === rawPid.toString() && (i.batchNumber || '') === batchNo
     );
 
     const itemData = {
@@ -177,12 +239,13 @@ exports.upsertItem = async (req, res) => {
       unit: (unit || product.unit || 'Pcs').trim(),
       costPrice: price,
       defaultQty: Math.max(1, parseInt(defaultQty) || 1),
-      isBatchProduct: (product.productType || 'batch') !== 'non-batch',
+      batchNumber: batchNo,
+      isBatchProduct: isBatch,
       notes: (notes || '').trim()
     };
 
     if (idx >= 0) {
-      list.items[idx] = { ...list.items[idx].toObject?.() || list.items[idx], ...itemData };
+      list.items[idx] = { ...(list.items[idx].toObject?.() || list.items[idx]), ...itemData };
     } else {
       list.items.push(itemData);
     }
