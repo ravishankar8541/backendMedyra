@@ -5,10 +5,287 @@ const mongoose = require('mongoose');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
+const nodemailer = require('nodemailer');
 
 // ============================================
 // GENERATE UNIQUE GRN NUMBER
 // ============================================
+
+
+exports.getPublicInvoiceView = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id || !require('mongoose').Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .send(
+          '<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;color:#ef4444;">Invalid Invoice Link</h2>'
+        );
+    }
+
+    // ConsolidatedInvoice must already be required at top of this file
+    const invoice = await ConsolidatedInvoice.findById(id);
+    if (!invoice) {
+      return res
+        .status(404)
+        .send(
+          '<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;color:#ef4444;">Purchase Invoice Not Found</h2>'
+        );
+    }
+
+    const currency = invoice.currency || 'INR';
+    const symbols = {
+      INR: '₹',
+      USD: '$',
+      EUR: '€',
+      GBP: '£',
+      AED: 'د.إ',
+      SAR: '﷼',
+      PKR: '₨',
+    };
+    const symbol = symbols[currency] || currency || '₹';
+    const invNo = String(invoice.invoiceNumber || '').replace(/^CI-/i, 'PI-');
+    const items = invoice.items || [];
+
+    const formatDate = (d) => {
+      if (!d) return '—';
+      try {
+        return new Date(d).toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        });
+      } catch {
+        return d;
+      }
+    };
+
+    let rowIndex = 0;
+    const itemRows = items
+      .map((item) => {
+        rowIndex++;
+        const qty =
+          Number(item.acceptedQty || item.quantity || item.receivedQty) || 0;
+        const rate = Number(item.unitPrice || item.rate) || 0;
+        const tax = Number(item.taxRate) || 0;
+        const lineTotal = qty * rate;
+        return `
+        <tr>
+          <td class="text-center" style="font-weight:700;color:#475569;">${rowIndex}</td>
+          <td>
+            <p style="font-weight:800;color:#000;margin-bottom:2px;">${item.productName || item.name || 'Product'}</p>
+            <p style="font-size:10px;color:#64748b;">HSN: ${item.hsn || '3004.90.99'}</p>
+            <p style="font-size:10px;color:#64748b;">Unit: ${item.unit || 'Strips'}</p>
+          </td>
+          <td class="text-center" style="font-family:monospace;font-size:11px;">${
+            item.batchNumber && item.batchNumber !== 'N/A' ? item.batchNumber : '-'
+          }</td>
+          <td class="text-center" style="font-weight:800;">${qty}</td>
+          <td class="text-right">${rate.toFixed(2)}</td>
+          <td class="text-center">${tax}%</td>
+          <td class="text-right" style="font-weight:900;color:#000;">${lineTotal.toFixed(2)}</td>
+        </tr>`;
+      })
+      .join('');
+
+    const freight = Number(invoice.freight?.amount || 0);
+    const insurance = Number(invoice.insurance?.amount || 0);
+    const inventory = Number(invoice.inventoryCharges?.amount || 0);
+    const itemsSubtotal = items.reduce((sum, item) => {
+      const qty =
+        Number(item.acceptedQty || item.quantity || item.receivedQty) || 0;
+      const rate = Number(item.unitPrice || item.rate) || 0;
+      return sum + qty * rate;
+    }, 0);
+    const totalTax = Number(invoice.totalTax || 0);
+    const grandTotal = Number(
+      invoice.grandTotal || itemsSubtotal + freight + insurance + inventory + totalTax
+    );
+    const paidAmt = Number(invoice.paidAmount || 0);
+    const balanceAmt = Math.max(0, grandTotal - paidAmt);
+    const taxTypeLabel =
+      invoice.gstType === 'cgst_sgst' ? 'CGST + SGST' : 'IGST';
+
+    let chargeRows = '';
+    if (freight > 0) {
+      rowIndex++;
+      chargeRows += `
+        <tr>
+          <td class="text-center" style="font-weight:700;">${rowIndex}</td>
+          <td><p style="font-weight:800;">Freight / Shipping Charges</p></td>
+          <td class="text-center">-</td>
+          <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-right">${freight.toFixed(2)}</td>
+          <td class="text-center">${Number(invoice.freight?.taxRate || 18)}%</td>
+          <td class="text-right" style="font-weight:900;">${freight.toFixed(2)}</td>
+        </tr>`;
+    }
+    if (insurance > 0) {
+      rowIndex++;
+      chargeRows += `
+        <tr>
+          <td class="text-center" style="font-weight:700;">${rowIndex}</td>
+          <td><p style="font-weight:800;">Insurance Charges</p></td>
+          <td class="text-center">-</td>
+          <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-right">${insurance.toFixed(2)}</td>
+          <td class="text-center">${Number(invoice.insurance?.taxRate || 18)}%</td>
+          <td class="text-right" style="font-weight:900;">${insurance.toFixed(2)}</td>
+        </tr>`;
+    }
+    if (inventory > 0) {
+      rowIndex++;
+      chargeRows += `
+        <tr>
+          <td class="text-center" style="font-weight:700;">${rowIndex}</td>
+          <td><p style="font-weight:800;">Inventory / Handling Charges</p></td>
+          <td class="text-center">-</td>
+          <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-right">${inventory.toFixed(2)}</td>
+          <td class="text-center">${Number(invoice.inventoryCharges?.taxRate || 18)}%</td>
+          <td class="text-right" style="font-weight:900;">${inventory.toFixed(2)}</td>
+        </tr>`;
+    }
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Purchase Invoice - ${invNo}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; padding: 25px; font-size: 11px; color: #0f172a; line-height: 1.4; }
+    .invoice-container { max-width: 210mm; margin: 0 auto; background: #ffffff; padding: 32px; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+    .header-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    .logo-box { width: 140px; height: 70px; background-color: #000000 !important; border-radius: 8px; padding: 6px; display: flex; align-items: center; justify-content: center; }
+    .logo-img { width: 100%; height: 100%; object-fit: contain; }
+    .invoice-title { font-size: 20px; font-weight: 900; color: #000000; text-transform: uppercase; }
+    .solid-divider { width: 100%; height: 2px; background: #000000; margin: 12px 0; }
+    .section-title { font-size: 11px; font-weight: 900; text-transform: uppercase; color: #000000; border-bottom: 2px solid #000000; padding-bottom: 2px; display: inline-block; margin-bottom: 6px; }
+    .items-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 11px; }
+    .items-table th { background-color: #e0f2fe !important; color: #0f172a; font-weight: 800; font-size: 10px; text-transform: uppercase; padding: 9px 10px; text-align: left; border-bottom: 2px solid #0284c7; }
+    .items-table td { padding: 9px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    .text-center { text-align: center; }
+    .text-right { text-align: right; }
+    .bottom-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; margin-top: 8px; }
+    .totals-box { border-top: 2px solid #000000; padding-top: 8px; font-size: 11px; }
+    .total-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #e2e8f0; }
+    .total-row.final { border-bottom: none; margin-top: 6px; padding: 8px 10px; border: 2px solid #000000; font-weight: 900; font-size: 14px; }
+    .print-bar { max-width: 210mm; margin: 0 auto 16px auto; display: flex; justify-content: flex-end; }
+    .print-btn { background: #013A59; color: #fff; border: none; padding: 10px 18px; font-weight: 700; border-radius: 6px; cursor: pointer; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .print-bar { display: none; }
+      .invoice-container { border: none; box-shadow: none; padding: 0; max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="print-bar">
+    <button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
+  </div>
+  <div class="invoice-container">
+    <table class="header-table">
+      <tr>
+        <td style="vertical-align:top; width:60%;">
+          <div class="logo-box" style="margin-bottom:8px;">
+            <img src="https://medyra-frontend-new-cwlc.vercel.app/medyraWhiteLogo.png" class="logo-img" alt="Medyra"
+              onerror="this.style.display='none';this.parentElement.innerHTML='<span style=\\'color:#fff;font-weight:900;font-size:16px;\\'>MEDYRA</span>'"/>
+          </div>
+          <div style="font-size:10px; color:#334155;">
+            <p style="font-weight:800;font-size:11px;">Medyra Pharmaceutical</p>
+            <p>Plot No. 65, Pocket-A, Sector-4, Bawana Industrial Area, DSIDC Delhi 110039, India</p>
+            <p>GSTIN: <strong>07BLQPR8835QZZR</strong> | Mobile: +91 9310879396</p>
+            <p>Email: Pharmaceutical@medyra.in</p>
+          </div>
+        </td>
+        <td style="vertical-align:top; text-align:right; width:40%;">
+          <div class="invoice-title">PURCHASE INVOICE</div>
+          <p style="font-weight:800;font-size:11px;margin-top:6px;">Invoice (PI): <span style="font-family:monospace;">${invNo}</span></p>
+          <p style="font-weight:700;font-size:11px;margin-top:2px;">Date: ${formatDate(invoice.invoiceDate)}</p>
+          <p style="font-weight:700;font-size:11px;margin-top:2px;">PO Ref: <span style="font-family:monospace;">${invoice.poNumber || '—'}</span></p>
+          <p style="font-weight:700;font-size:11px;margin-top:2px;">Due Date: ${formatDate(invoice.dueDate)}</p>
+        </td>
+      </tr>
+    </table>
+
+    <div class="solid-divider"></div>
+
+    <div style="margin-bottom:12px;">
+      <div class="section-title">VENDOR DETAILS</div>
+      <div style="font-size:11px;margin-top:4px;">
+        <h4 style="font-size:13px;font-weight:900;color:#000;">${invoice.supplierName || 'N/A'}</h4>
+        <p style="color:#1e293b;max-width:500px;line-height:1.2;margin:2px 0 6px 0;">${invoice.supplierAddress || 'N/A'}</p>
+        <p><strong>GSTIN / TAX ID:</strong> ${invoice.supplierGST || 'N/A'}</p>
+        <p><strong>Contact:</strong> ${invoice.supplierContact || 'N/A'}</p>
+        <p><strong>Email:</strong> ${invoice.supplierEmail || 'N/A'}</p>
+      </div>
+    </div>
+
+    <table class="items-table">
+      <thead>
+        <tr>
+          <th style="width:32px;" class="text-center">#</th>
+          <th>Item & Description</th>
+          <th class="text-center" style="width:90px;">Batch</th>
+          <th class="text-center" style="width:60px;">Qty</th>
+          <th class="text-right" style="width:80px;">Rate (${symbol})</th>
+          <th class="text-center" style="width:60px;">Tax</th>
+          <th class="text-right" style="width:90px;">Total (${symbol})</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemRows}
+        ${chargeRows}
+      </tbody>
+    </table>
+
+    <div class="bottom-grid">
+      <div>
+        <p><strong>Currency:</strong> ${currency}</p>
+        ${invoice.notes && invoice.notes !== 'No notes' ? `<p style="margin-top:6px;"><strong>Notes:</strong> ${invoice.notes}</p>` : ''}
+      </div>
+      <div class="totals-box">
+        <div class="total-row">
+          <span style="color:#475569;font-weight:700;">Sub Total</span>
+          <span style="font-weight:800;">${symbol}${itemsSubtotal.toFixed(2)}</span>
+        </div>
+        ${freight > 0 ? `<div class="total-row"><span>Freight</span><span>${symbol}${freight.toFixed(2)}</span></div>` : ''}
+        ${insurance > 0 ? `<div class="total-row"><span>Insurance</span><span>${symbol}${insurance.toFixed(2)}</span></div>` : ''}
+        ${inventory > 0 ? `<div class="total-row"><span>Inventory / Handling</span><span>${symbol}${inventory.toFixed(2)}</span></div>` : ''}
+        <div class="total-row">
+          <span style="color:#475569;font-weight:700;">Total Tax (${taxTypeLabel})</span>
+          <span style="font-weight:800;color:#d97706;">${symbol}${totalTax.toFixed(2)}</span>
+        </div>
+        <div class="total-row final">
+          <span style="text-transform:uppercase;">TOTAL (${currency})</span>
+          <span>${symbol}${grandTotal.toFixed(2)}</span>
+        </div>
+        <div class="total-row" style="margin-top:8px;padding:6px 0;">
+          <span style="color:#059669;font-weight:700;">Paid</span>
+          <span style="font-weight:800;color:#059669;">${symbol}${paidAmt.toFixed(2)}</span>
+        </div>
+        <div class="total-row" style="padding:6px 8px;border-bottom:none;background:#f1f5f9;border-radius:4px;">
+          <span style="color:${balanceAmt > 0 ? '#dc2626' : '#059669'};font-weight:700;">Balance</span>
+          <span style="font-weight:900;color:${balanceAmt > 0 ? '#dc2626' : '#059669'};">${symbol}${balanceAmt.toFixed(2)}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html');
+    return res.send(html);
+  } catch (err) {
+    console.error('Public Invoice View error:', err);
+    return res
+      .status(500)
+      .send('<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;">Error loading Purchase Invoice</h2>');
+  }
+};
 const generateGRNNumber = async () => {
   const year = new Date().getFullYear();
   const last = await GoodsReceipt.findOne({
@@ -1391,7 +1668,7 @@ exports.sendPurchaseInvoiceEmail = async (req, res) => {
       message: `Email successfully sent to ${to.trim()}`,
       messageId: info.messageId
     });
-  } catch (error) {
+   } catch (error) {
     console.error('❌ Send Purchase Invoice Email Error:', error);
     return res.status(500).json({
       success: false,

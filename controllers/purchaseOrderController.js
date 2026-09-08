@@ -70,7 +70,7 @@ exports.getPublicPOView = async (req, res) => {
       phone: '+91 9310879396',
       contactPerson: 'Miss Ruby Rani',
       // Use a reliable logo URL (or keep your current one)
-      logoUrl: 'https://medyra-frontend-new-cwlc.vercel.app/medyraWhiteLogo.png'
+      logoUrl: 'https://res.cloudinary.com/dq3izjr7b/image/upload/v1788842622/medyraWhiteLogo_hl3u0h.png'
     };
 
     const items = order.items || [];
@@ -315,13 +315,12 @@ exports.getPublicPOView = async (req, res) => {
 };
 
 // ============================================
-// SEND PO VIA EMAIL  (FULLY FIXED)
+// SEND PO VIA EMAIL (FIXED FOR TITAN SMTP GREETING TIMEOUT)
 // ============================================
 exports.sendPOEmail = async (req, res) => {
   try {
     let emailData = req.body;
 
-    // Support both plain JSON body and FormData with "emailData" field
     if (req.body.emailData) {
       if (typeof req.body.emailData === 'string') {
         try {
@@ -343,7 +342,6 @@ exports.sendPOEmail = async (req, res) => {
       });
     }
 
-    // Attach PDF only when a real file was uploaded
     const attachments = [];
     if (req.file && req.file.buffer) {
       attachments.push({
@@ -365,8 +363,10 @@ exports.sendPOEmail = async (req, res) => {
       </div>
     `);
 
+    const mailHost = (process.env.EMAIL_HOST || 'smtp.titan.email').trim();
+    const mailPort = parseInt(process.env.EMAIL_PORT, 10) || 587;
     const mailUser = (process.env.EMAIL_USER || '').trim();
-    const mailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
+    const mailPass = (process.env.EMAIL_PASS || '').trim();
 
     if (!mailUser || !mailPass) {
       return res.status(500).json({
@@ -375,35 +375,36 @@ exports.sendPOEmail = async (req, res) => {
       });
     }
 
-    // Clean CC (ignore dummy values)
     const validCc =
       cc &&
       typeof cc === 'string' &&
       cc.trim().length > 3 &&
       cc.includes('@') &&
-      !cc.includes('example.com') &&
-      !cc.includes('medyra.in')
+      !cc.includes('example.com')
         ? cc.trim()
         : undefined;
 
-    // Reliable Gmail transporter
+    // Titan Email Transporter with correct TLS & Timeouts
+    const isPort465 = mailPort === 465;
+
     const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,               // true for port 465
+      host: mailHost,
+      port: mailPort,
+      secure: isPort465, // true for 465, false for 587
       auth: {
         user: mailUser,
         pass: mailPass
       },
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
-      socketTimeout: 20000,
       tls: {
-        rejectUnauthorized: false
-      }
+        rejectUnauthorized: false,
+        minVersion: 'TLSv1.2'
+      },
+      connectionTimeout: 40000,
+      greetingTimeout: 30000,
+      socketTimeout: 40000,
+      dnsTimeout: 15000
     });
 
-    // Verify SMTP connection first (clear error if credentials are wrong)
     await transporter.verify();
 
     const info = await transporter.sendMail({
@@ -415,7 +416,6 @@ exports.sendPOEmail = async (req, res) => {
       attachments
     });
 
-    // Mark the PO as emailed
     if (poNumber) {
       await PurchaseOrder.findOneAndUpdate(
         { poNumber },
@@ -436,8 +436,7 @@ exports.sendPOEmail = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      error: error.message || 'SMTP connection / authentication failed',
-      code: error.code || null
+      error: error.message || 'SMTP connection or authentication failed'
     });
   }
 };
