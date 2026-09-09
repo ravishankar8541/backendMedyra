@@ -1,22 +1,20 @@
-
-
 // controllers/goodsReceiptController.js
 const mongoose = require('mongoose');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
+const JournalEntry = require('../models/JournalEntry');
 const nodemailer = require('nodemailer');
+const { syncAllAutomatedJournals } = require('./accountingController'); // ⭐ Instant Sync
 
 // ============================================
-// GENERATE UNIQUE GRN NUMBER
+// PUBLIC INVOICE VIEW (NO AUTH REQUIRED)
 // ============================================
-
-
 exports.getPublicInvoiceView = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!id || !require('mongoose').Types.ObjectId.isValid(id)) {
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .send(
@@ -24,7 +22,6 @@ exports.getPublicInvoiceView = async (req, res) => {
         );
     }
 
-    // ConsolidatedInvoice must already be required at top of this file
     const invoice = await ConsolidatedInvoice.findById(id);
     if (!invoice) {
       return res
@@ -286,6 +283,7 @@ exports.getPublicInvoiceView = async (req, res) => {
       .send('<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;">Error loading Purchase Invoice</h2>');
   }
 };
+
 const generateGRNNumber = async () => {
   const year = new Date().getFullYear();
   const last = await GoodsReceipt.findOne({
@@ -306,9 +304,6 @@ const generateGRNNumber = async () => {
   return grnNumber;
 };
 
-// ============================================
-// GENERATE UNIQUE PURCHASE INVOICE NUMBER (PI)
-// ============================================
 const generateConsolidatedInvoiceNumber = async () => {
   const year = new Date().getFullYear();
   const last = await ConsolidatedInvoice.findOne({
@@ -583,7 +578,6 @@ exports.createGRN = async (req, res) => {
       const chargesSubtotal = freightData.amount + insuranceData.amount + inventoryData.amount;
       const chargesTax = freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
 
-      // ✅ 100% Exact PO match (Includes both items tax and charges tax)
       const totalTax = itemsTax + chargesTax;
       const exactTotal = subtotal + chargesSubtotal + totalTax;
       const isInternational = poCurrency && poCurrency !== 'INR';
@@ -760,7 +754,7 @@ exports.createGRN = async (req, res) => {
         payments: grn.payments || [],
         remainingAmount: Math.max(0, grn.grandTotal - (grn.paidAmount || 0)),
         paymentStatus: (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : (grn.paidAmount > 0 ? 'partial' : 'pending'),
-        status: 'generated',
+        status: (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated',
         notes: notes || '',
         createdBy: req.user?.id || req.user?._id,
         receiptCount: 1
@@ -780,6 +774,7 @@ exports.createGRN = async (req, res) => {
       existingInvoice.paidAmount = grn.paidAmount || 0;
       existingInvoice.remainingAmount = Math.max(0, grn.grandTotal - (grn.paidAmount || 0));
       existingInvoice.paymentStatus = (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : (grn.paidAmount > 0 ? 'partial' : 'pending');
+      existingInvoice.status = (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated';
       existingInvoice.payments = grn.payments || [];
       existingInvoice.receiptCount = (existingInvoice.receiptCount || 0) + 1;
       await existingInvoice.save();
@@ -789,6 +784,15 @@ exports.createGRN = async (req, res) => {
     grn.invoiceGenerated = true;
     grn.invoiceId = existingInvoice._id;
     await grn.save();
+
+    // Trigger auto journal sync
+    try {
+      if (syncAllAutomatedJournals) {
+        await syncAllAutomatedJournals();
+      }
+    } catch (e) {
+      console.warn('Auto journal sync trigger error:', e.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -803,7 +807,7 @@ exports.createGRN = async (req, res) => {
 };
 
 // ============================================
-// UPDATE GRN (FULL EDIT - WITH STOCK, CHARGES & PO RE-SYNC)
+// UPDATE GRN
 // ============================================
 exports.updateGRN = async (req, res) => {
   try {
@@ -830,7 +834,6 @@ exports.updateGRN = async (req, res) => {
     if (notes !== undefined) grn.notes = notes;
     if (gstType !== undefined) grn.gstType = gstType;
 
-    // Charges Update
     if (freight) {
       const amt = Number(freight.amount) || 0;
       const rate = Number(freight.taxRate) || 0;
@@ -847,7 +850,6 @@ exports.updateGRN = async (req, res) => {
       grn.inventoryCharges = { amount: amt, taxRate: rate, taxAmount: (amt * rate) / 100 };
     }
 
-    // Items & Stock Adjustments
     if (Array.isArray(items)) {
       let newSubtotal = 0;
       let newItemsTax = 0;
@@ -937,7 +939,6 @@ exports.updateGRN = async (req, res) => {
     grn.chargesSubtotal = cSub;
     grn.chargesTax = cTax;
 
-    // ✅ Combine items tax + charges tax for true total
     const totalTaxCombined = (Number(grn.totalTax) || 0) + cTax;
     grn.totalTax = totalTaxCombined;
 
@@ -948,7 +949,6 @@ exports.updateGRN = async (req, res) => {
 
     await grn.save();
 
-    // Re-sync Purchase Order status
     if (grn.purchaseOrder) {
       const po = await PurchaseOrder.findById(grn.purchaseOrder);
       if (po) {
@@ -975,7 +975,6 @@ exports.updateGRN = async (req, res) => {
       }
     }
 
-    // Sync Consolidated Invoice (PI)
     let inv = null;
     if (grn.consolidatedInvoiceId) {
       inv = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
@@ -999,7 +998,16 @@ exports.updateGRN = async (req, res) => {
       inv.items = grn.items;
       inv.remainingAmount = Math.max(0, inv.grandTotal - (Number(inv.paidAmount) || 0));
       inv.paymentStatus = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : (inv.paidAmount > 0 ? 'partial' : 'pending');
+      inv.status = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : 'generated';
       await inv.save();
+    }
+
+    try {
+      if (syncAllAutomatedJournals) {
+        await syncAllAutomatedJournals();
+      }
+    } catch (e) {
+      console.warn('Sync error on updateGRN:', e.message);
     }
 
     res.json({
@@ -1014,7 +1022,7 @@ exports.updateGRN = async (req, res) => {
 };
 
 // ============================================
-// UPDATE PURCHASE INVOICE (FULL EDIT CONTROL)
+// UPDATE PURCHASE INVOICE
 // ============================================
 exports.updateConsolidatedInvoice = async (req, res) => {
   try {
@@ -1047,7 +1055,6 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     if (supplierAddress !== undefined) invoice.supplierAddress = supplierAddress;
     if (gstType !== undefined) invoice.gstType = gstType;
 
-    // Full Items update
     if (Array.isArray(items)) {
       let newSubtotal = 0;
       let newItemsTax = 0;
@@ -1089,7 +1096,6 @@ exports.updateConsolidatedInvoice = async (req, res) => {
       invoice.totalTax = newItemsTax;
     }
 
-    // Charges
     if (freight) {
       const amt = Number(freight.amount) || 0;
       const rate = Number(freight.taxRate) || 0;
@@ -1126,10 +1132,10 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 
     invoice.remainingAmount = Math.max(0, invoice.grandTotal - (Number(invoice.paidAmount) || 0));
     invoice.paymentStatus = (invoice.paidAmount || 0) >= invoice.grandTotal ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
+    invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
 
     await invoice.save();
 
-    // Also sync the Goods Receipt
     if (invoice.grnIds && invoice.grnIds.length > 0) {
       const grn = await GoodsReceipt.findById(invoice.grnIds[0]);
       if (grn) {
@@ -1145,6 +1151,14 @@ exports.updateConsolidatedInvoice = async (req, res) => {
         grn.items = invoice.items;
         await grn.save();
       }
+    }
+
+    try {
+      if (syncAllAutomatedJournals) {
+        await syncAllAutomatedJournals();
+      }
+    } catch (e) {
+      console.warn('Sync error on updateInvoice:', e.message);
     }
 
     res.json({
@@ -1172,6 +1186,13 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
     }
+
+    await JournalEntry.deleteMany({
+      $or: [
+        { sourceId: invoice._id },
+        { referenceNumber: invoice.invoiceNumber }
+      ]
+    });
 
     const grnIds = invoice.grnIds || (invoice.grnId ? [invoice.grnId] : []);
     if ((!grnIds || grnIds.length === 0) && invoice._id) {
@@ -1242,7 +1263,7 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Purchase Invoice deleted. Stock reversed and GRN is available again for Create GRN.'
+      message: 'Purchase Invoice and corresponding double-entry accounting journals deleted successfully. Stock reversed.'
     });
   } catch (error) {
     console.error('❌ Delete Invoice error:', error);
@@ -1251,7 +1272,7 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
 };
 
 // ============================================
-// ADD PAYMENT
+// ⭐ ADD PAYMENT (REAL-TIME AUTO-JOURNAL SYNC FIX)
 // ============================================
 exports.addPayment = async (req, res) => {
   try {
@@ -1281,10 +1302,11 @@ exports.addPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Goods Receipt or Invoice record not found' });
     }
 
+    const cleanMethod = (method || paymentMethod || 'bank').toLowerCase().replace(/\s+/g, '_');
     const paymentEntry = {
       date: date || paymentDate || new Date().toISOString().split('T')[0],
       amount: paymentAmount,
-      method: method || paymentMethod || 'bank',
+      method: cleanMethod,
       reference: reference || transactionId || '',
       notes: notes || '',
       receivedBy: req.user?.name || 'System'
@@ -1303,14 +1325,23 @@ exports.addPayment = async (req, res) => {
       invoice.paidAmount = (Number(invoice.paidAmount) || 0) + paymentAmount;
       invoice.remainingAmount = Math.max(0, (invoice.grandTotal || 0) - invoice.paidAmount);
       invoice.paymentStatus = invoice.remainingAmount <= 0 ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
-      invoice.status = invoice.paymentStatus;
+      invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
       await invoice.save();
+    }
+
+    // ⭐ Auto-sync journals immediately so JV-DSB is created in database right away!
+    try {
+      if (syncAllAutomatedJournals) {
+        await syncAllAutomatedJournals();
+      }
+    } catch (syncErr) {
+      console.error('Error auto-syncing journals upon payment:', syncErr);
     }
 
     return res.json({
       success: true,
       data: grn || invoice,
-      message: `✅ Payment of ${paymentAmount} recorded successfully!`
+      message: `✅ Payment of ${paymentAmount} recorded and journal disbursement synced successfully!`
     });
   } catch (error) {
     console.error('❌ Add payment error:', error);
@@ -1320,6 +1351,9 @@ exports.addPayment = async (req, res) => {
 
 exports.addConsolidatedPayment = exports.addPayment;
 
+// ============================================
+// GET CONSOLIDATED INVOICES
+// ============================================
 exports.getConsolidatedInvoices = async (req, res) => {
   try {
     const { page = 1, limit = 15, search, supplierId, paymentStatus, startDate, endDate } = req.query;
@@ -1388,6 +1422,9 @@ exports.getConsolidatedInvoice = async (req, res) => {
   }
 };
 
+// ============================================
+// GET GOODS RECEIPTS (GRN)
+// ============================================
 exports.getGRNs = async (req, res) => {
   try {
     const { page = 1, limit = 15, search, startDate, endDate, supplierId, status } = req.query;
@@ -1474,10 +1511,20 @@ exports.getGRN = async (req, res) => {
   }
 };
 
+// ============================================
+// DELETE GRN
+// ============================================
 exports.deleteGRN = async (req, res) => {
   try {
     const grn = await GoodsReceipt.findById(req.params.id);
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });
+
+    await JournalEntry.deleteMany({
+      $or: [
+        { sourceId: grn._id },
+        { referenceNumber: grn.grnNumber }
+      ]
+    });
 
     for (const item of grn.items) {
       const receivedQty = Number(item.receivedQty) || Number(item.acceptedQty) || 0;
@@ -1496,7 +1543,7 @@ exports.deleteGRN = async (req, res) => {
         if (isBatch && Array.isArray(product.batches)) {
           const batchIndex = product.batches.findIndex((b) => b.batchNumber === item.batchNumber);
           if (batchIndex > -1) {
-            product.batches[batchIndex].quantity = Math.max(0, (product.batches[batchIndex].quantity || 0) - receivedQty);
+            product.batches[batchIndex].quantity = Math.max(0, (Number(product.batches[batchIndex].quantity) || 0) - receivedQty);
             if (product.batches[batchIndex].quantity === 0) product.batches.splice(batchIndex, 1);
           }
           product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
@@ -1521,12 +1568,15 @@ exports.deleteGRN = async (req, res) => {
     }
 
     await grn.deleteOne();
-    res.json({ success: true, message: 'GRN deleted successfully with stock reversal' });
+    res.json({ success: true, message: 'GRN and linked journals deleted successfully with stock reversal' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
+// ============================================
+// RECEIPT DASHBOARD
+// ============================================
 exports.getReceiptDashboard = async (req, res) => {
   try {
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -1668,7 +1718,7 @@ exports.sendPurchaseInvoiceEmail = async (req, res) => {
       message: `Email successfully sent to ${to.trim()}`,
       messageId: info.messageId
     });
-   } catch (error) {
+  } catch (error) {
     console.error('❌ Send Purchase Invoice Email Error:', error);
     return res.status(500).json({
       success: false,

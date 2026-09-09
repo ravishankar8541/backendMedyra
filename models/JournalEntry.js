@@ -1,3 +1,6 @@
+
+
+
 // models/JournalEntry.js
 const mongoose = require('mongoose');
 
@@ -39,6 +42,10 @@ const JournalEntrySchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true
+  },
+  voucherNo: {
+    type: String,
+    default: ''
   },
   date: {
     type: Date,

@@ -1,12 +1,13 @@
+
 // controllers/accountingController.js
 const mongoose = require('mongoose');
 const Account = require('../models/Account');
 const JournalEntry = require('../models/JournalEntry');
 const Invoice = require('../models/Invoice');
-const { ConsolidatedInvoice, GoodsReceipt } = require('../models/GoodsReceipt');
+const { ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const Product = require('../models/Product');
 
-// Standard Chart of Accounts Template
+// Standard Chart of Accounts Template (Zoho Books Standard)
 const DEFAULT_ACCOUNTS = [
   // Assets (1000s)
   { code: '1000', name: 'Cash in Hand', type: 'asset', subType: 'cash', isSystem: true },
@@ -26,7 +27,7 @@ const DEFAULT_ACCOUNTS = [
   { code: '2020', name: 'Advance Received from Clients', type: 'liability', subType: 'current_liability', isSystem: true },
 
   // Equity (3000s)
-  { code: '3000', name: 'Owner’s Capital / Share Capital', type: 'equity', subType: 'equity', isSystem: true },
+  { code: '3000', name: "Owner's Capital / Share Capital", type: 'equity', subType: 'equity', isSystem: true },
   { code: '3010', name: 'Retained Earnings', type: 'equity', subType: 'retained_earnings', isSystem: true },
 
   // Revenue (4000s)
@@ -46,6 +47,26 @@ const DEFAULT_ACCOUNTS = [
   { code: '5070', name: 'Office Utilities & Administration', type: 'expense', subType: 'operating_expense', isSystem: false },
   { code: '5080', name: 'Round-off Expense / (Gain)', type: 'expense', subType: 'operating_expense', isSystem: false }
 ];
+
+// Helper: Safely parse Date without throwing Mongoose CastError on DD/MM/YYYY or strings
+const parseSafeDate = (d) => {
+  if (!d) return new Date();
+  if (d instanceof Date && !isNaN(d.getTime())) return d;
+  if (typeof d === 'string') {
+    const trimmed = d.trim();
+    const parts = trimmed.split(/[-/]/);
+    if (parts.length === 3 && parts[0].length <= 2 && parts[2].length === 4) {
+      const day = parts[0].padStart(2, '0');
+      const month = parts[1].padStart(2, '0');
+      const year = parts[2];
+      const parsed = new Date(`${year}-${month}-${day}`);
+      if (!isNaN(parsed.getTime())) return parsed;
+    }
+    const standardParsed = new Date(trimmed);
+    if (!isNaN(standardParsed.getTime())) return standardParsed;
+  }
+  return new Date();
+};
 
 const getAccountMap = async () => {
   const existing = await Account.find({ isActive: true });
@@ -86,11 +107,28 @@ const getLiveInventoryValuation = async () => {
 };
 
 // =========================================================================
-// ⚡ AUTOMATED JOURNAL ENTRY SYNCHRONIZER (WITH ORPHAN CLEANUP)
+// AUTOMATED JOURNAL ENTRY SYNCHRONIZER
 // =========================================================================
 const syncAllAutomatedJournals = async () => {
   try {
+    // ⭐ CRITICAL FIX: Automatically drop the obsolete voucherNo_1 duplicate key index
+    try {
+      const collection = mongoose.connection.collection('journalentries');
+      const existingIndexes = await collection.indexes();
+      const hasBadIndex = existingIndexes.some(idx => idx.name === 'voucherNo_1');
+      if (hasBadIndex) {
+        await collection.dropIndex('voucherNo_1');
+        console.log('✅ Successfully dropped obsolete voucherNo_1 index to fix duplicate key error.');
+      }
+    } catch (idxError) {
+      // Ignore if index doesn't exist
+    }
+
     const accMap = await getAccountMap();
+
+    const getAcc = (code, fallback = '1000') => {
+      return accMap.get(code) || accMap.get(fallback) || Array.from(accMap.values())[0];
+    };
 
     const [salesInvoices, purchaseInvoices] = await Promise.all([
       Invoice.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: 1 }),
@@ -98,7 +136,7 @@ const syncAllAutomatedJournals = async () => {
     ]);
 
     // -------------------------------------------------------------
-    // 0. CLEANUP ORPHANED AUTO-JOURNALS (IF INVOICE WAS DELETED)
+    // 0. PURGE ORPHANED AUTO-JOURNALS
     // -------------------------------------------------------------
     const salesInvIds = new Set(salesInvoices.map(i => String(i._id)));
     const salesInvNums = new Set(salesInvoices.map(i => i.invoiceNumber));
@@ -127,13 +165,14 @@ const syncAllAutomatedJournals = async () => {
     }
 
     // -------------------------------------------------------------
-    // 1. AUTO POST SALES INVOICES & PAYMENTS
+    // 1. AUTO-POST SALES INVOICES AND PAYMENTS
     // -------------------------------------------------------------
     for (const inv of salesInvoices) {
       const invId = inv._id;
-      const invDate = inv.date ? new Date(inv.date) : new Date(inv.createdAt);
+      const invDate = parseSafeDate(inv.date || inv.createdAt);
       const isDomestic = inv.type === 'domestic' || !inv.type || inv.currency === 'INR';
       const invNum = inv.invoiceNumber;
+      const cleanInvNum = invNum.replace(/[^a-zA-Z0-9]/g, '');
       const totalAmount = Number(inv.total) || 0;
       const subtotal = Number(inv.subtotal) || 0;
       const tax = Number(inv.tax) || 0;
@@ -141,60 +180,52 @@ const syncAllAutomatedJournals = async () => {
       const insurance = Number(inv.insurance) || 0;
       const cogs = Number(inv.totalCost) || 0;
 
-      const salesJvExists = await JournalEntry.findOne({
-        sourceModule: 'sales_invoice',
-        sourceId: invId
-      });
-
-      if (!salesJvExists && totalAmount > 0) {
+      if (totalAmount > 0) {
         const lines = [];
 
-        // Debit Debtors
         lines.push({
-          account: accMap.get('1020')._id,
+          account: getAcc('1020')._id,
           accountCode: '1020',
-          accountName: accMap.get('1020').name,
+          accountName: getAcc('1020').name,
           debit: totalAmount,
           credit: 0,
           description: `Bill to ${inv.customer?.name || 'Customer'}`
         });
 
-        // Credit Sales Revenue
         const revenueAccCode = isDomestic ? '4000' : '4010';
         lines.push({
-          account: accMap.get(revenueAccCode)._id,
+          account: getAcc(revenueAccCode)._id,
           accountCode: revenueAccCode,
-          accountName: accMap.get(revenueAccCode).name,
+          accountName: getAcc(revenueAccCode).name,
           debit: 0,
           credit: subtotal,
           description: `Sales revenue for ${invNum}`
         });
 
-        // Credit Output Tax
         if (tax > 0) {
           if (inv.taxType === 'cgst_sgst' && isDomestic) {
             const halfTax = Math.round((tax / 2) * 100) / 100;
             lines.push({
-              account: accMap.get('2010')._id,
+              account: getAcc('2010')._id,
               accountCode: '2010',
-              accountName: accMap.get('2010').name,
+              accountName: getAcc('2010').name,
               debit: 0,
               credit: halfTax,
               description: 'Output CGST'
             });
             lines.push({
-              account: accMap.get('2011')._id,
+              account: getAcc('2011')._id,
               accountCode: '2011',
-              accountName: accMap.get('2011').name,
+              accountName: getAcc('2011').name,
               debit: 0,
               credit: tax - halfTax,
               description: 'Output SGST'
             });
           } else {
             lines.push({
-              account: accMap.get('2012')._id,
+              account: getAcc('2012')._id,
               accountCode: '2012',
-              accountName: accMap.get('2012').name,
+              accountName: getAcc('2012').name,
               debit: 0,
               credit: tax,
               description: 'Output IGST / Export Tax'
@@ -204,9 +235,9 @@ const syncAllAutomatedJournals = async () => {
 
         if (freight > 0) {
           lines.push({
-            account: accMap.get('4020')._id,
+            account: getAcc('4020')._id,
             accountCode: '4020',
-            accountName: accMap.get('4020').name,
+            accountName: getAcc('4020').name,
             debit: 0,
             credit: freight,
             description: 'Freight collected'
@@ -214,9 +245,9 @@ const syncAllAutomatedJournals = async () => {
         }
         if (insurance > 0) {
           lines.push({
-            account: accMap.get('4030')._id,
+            account: getAcc('4030')._id,
             accountCode: '4030',
-            accountName: accMap.get('4030').name,
+            accountName: getAcc('4030').name,
             debit: 0,
             credit: insurance,
             description: 'Insurance collected'
@@ -229,18 +260,18 @@ const syncAllAutomatedJournals = async () => {
         if (Math.abs(roundDiff) > 0.001) {
           if (roundDiff > 0) {
             lines.push({
-              account: accMap.get('5080')._id,
+              account: getAcc('5080')._id,
               accountCode: '5080',
-              accountName: accMap.get('5080').name,
+              accountName: getAcc('5080').name,
               debit: 0,
               credit: roundDiff,
               description: 'Invoice round-off gain'
             });
           } else {
             lines.push({
-              account: accMap.get('5080')._id,
+              account: getAcc('5080')._id,
               accountCode: '5080',
-              accountName: accMap.get('5080').name,
+              accountName: getAcc('5080').name,
               debit: Math.abs(roundDiff),
               credit: 0,
               description: 'Invoice round-off adjustment'
@@ -250,9 +281,10 @@ const syncAllAutomatedJournals = async () => {
 
         const totalD = lines.reduce((s, l) => s + l.debit, 0);
         const totalC = lines.reduce((s, l) => s + l.credit, 0);
-
-        await JournalEntry.create({
-          entryNumber: `JV-INV-${invNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+        const jvKey = `JV-INV-${cleanInvNum}`;
+        const jvPayload = {
+          entryNumber: jvKey,
+          voucherNo: jvKey, // Both fields populated
           date: invDate,
           referenceNumber: invNum,
           sourceModule: 'sales_invoice',
@@ -262,11 +294,19 @@ const syncAllAutomatedJournals = async () => {
           totalDebit: Math.round(totalD * 100) / 100,
           totalCredit: Math.round(totalC * 100) / 100,
           status: 'posted'
-        });
+        };
+
+        await JournalEntry.findOneAndUpdate(
+          { sourceModule: 'sales_invoice', sourceId: invId },
+          jvPayload,
+          { upsert: true, new: true }
+        );
 
         if (cogs > 0) {
-          await JournalEntry.create({
-            entryNumber: `JV-COGS-${invNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+          const cogsKey = `JV-COGS-${cleanInvNum}`;
+          const cogsPayload = {
+            entryNumber: cogsKey,
+            voucherNo: cogsKey,
             date: invDate,
             referenceNumber: invNum,
             sourceModule: 'inventory_adjustment',
@@ -274,17 +314,17 @@ const syncAllAutomatedJournals = async () => {
             memo: `COGS Recognition for ${invNum}`,
             lines: [
               {
-                account: accMap.get('5000')._id,
+                account: getAcc('5000')._id,
                 accountCode: '5000',
-                accountName: accMap.get('5000').name,
+                accountName: getAcc('5000').name,
                 debit: cogs,
                 credit: 0,
                 description: `Cost of goods dispatched for ${invNum}`
               },
               {
-                account: accMap.get('1030')._id,
+                account: getAcc('1030')._id,
                 accountCode: '1030',
-                accountName: accMap.get('1030').name,
+                accountName: getAcc('1030').name,
                 debit: 0,
                 credit: cogs,
                 description: `Inventory reduction for ${invNum}`
@@ -293,80 +333,96 @@ const syncAllAutomatedJournals = async () => {
             totalDebit: cogs,
             totalCredit: cogs,
             status: 'posted'
-          });
+          };
+          await JournalEntry.findOneAndUpdate(
+            { sourceModule: 'inventory_adjustment', sourceId: invId },
+            cogsPayload,
+            { upsert: true, new: true }
+          );
         }
       }
 
       // Customer payments
-      const payments = inv.payments || [];
-      for (let pIdx = 0; pIdx < payments.length; pIdx++) {
-        const pay = payments[pIdx];
+      let customerPayments = (inv.payments && inv.payments.length > 0) ? inv.payments : [];
+      if (customerPayments.length === 0 && Number(inv.paidAmount) > 0) {
+        customerPayments = [{
+          date: inv.date || inv.createdAt,
+          amount: Number(inv.paidAmount),
+          method: 'bank_transfer',
+          reference: inv.invoiceNumber
+        }];
+      }
+
+      for (let pIdx = 0; pIdx < customerPayments.length; pIdx++) {
+        const pay = customerPayments[pIdx];
         const payAmt = Number(pay.amount) || 0;
         if (payAmt <= 0) continue;
 
-        const payKey = `JV-RCT-${invNum.replace(/[^a-zA-Z0-9]/g, '')}-${pIdx + 1}`;
-        const rctExists = await JournalEntry.findOne({ entryNumber: payKey });
+        const payKey = `JV-RCT-${cleanInvNum}-${pIdx + 1}`;
+        const bankCode = (pay.method === 'cash') ? '1000' : '1010';
 
-        if (!rctExists) {
-          const bankCode = (pay.method === 'cash') ? '1000' : '1010';
-          await JournalEntry.create({
-            entryNumber: payKey,
-            date: pay.date ? new Date(pay.date) : invDate,
-            referenceNumber: pay.reference || invNum,
-            sourceModule: 'payment_receipt',
-            sourceId: invId,
-            memo: `Payment Received from ${inv.customer?.name || 'Customer'} on ${invNum} (${pay.method})`,
-            lines: [
-              {
-                account: accMap.get(bankCode)._id,
-                accountCode: bankCode,
-                accountName: accMap.get(bankCode).name,
-                debit: payAmt,
-                credit: 0,
-                description: `Collection via ${pay.method} [Ref: ${pay.reference || 'None'}]`
-              },
-              {
-                account: accMap.get('1020')._id,
-                accountCode: '1020',
-                accountName: accMap.get('1020').name,
-                debit: 0,
-                credit: payAmt,
-                description: `Receivables settled on ${invNum}`
-              }
-            ],
-            totalDebit: payAmt,
-            totalCredit: payAmt,
-            status: 'posted'
-          });
-        }
+        const rctPayload = {
+          entryNumber: payKey,
+          voucherNo: payKey,
+          date: parseSafeDate(pay.date || invDate),
+          referenceNumber: pay.reference || invNum,
+          sourceModule: 'payment_receipt',
+          sourceId: invId,
+          memo: `Payment Received from ${inv.customer?.name || 'Customer'} on ${invNum} (${pay.method || 'bank'})`,
+          lines: [
+            {
+              account: getAcc(bankCode)._id,
+              accountCode: bankCode,
+              accountName: getAcc(bankCode).name,
+              debit: payAmt,
+              credit: 0,
+              description: `Collection via ${pay.method || 'bank'} [Ref: ${pay.reference || 'None'}]`
+            },
+            {
+              account: getAcc('1020')._id,
+              accountCode: '1020',
+              accountName: getAcc('1020').name,
+              debit: 0,
+              credit: payAmt,
+              description: `Receivables settled on ${invNum}`
+            }
+          ],
+          totalDebit: payAmt,
+          totalCredit: payAmt,
+          status: 'posted'
+        };
+
+        await JournalEntry.findOneAndUpdate(
+          { entryNumber: payKey },
+          rctPayload,
+          { upsert: true, new: true }
+        );
       }
     }
 
     // -------------------------------------------------------------
-    // 2. AUTO POST PURCHASE INVOICES (PI) & VENDOR PAYMENTS
+    // 2. PURCHASE BILL VOUCHER (JV-PI) & DISBURSEMENT (JV-DSB)
     // -------------------------------------------------------------
     for (const pi of purchaseInvoices) {
       const piId = pi._id;
       const piNum = pi.invoiceNumber;
-      const piDate = pi.invoiceDate ? new Date(pi.invoiceDate) : new Date(pi.createdAt);
+      const cleanPiNum = piNum.replace(/[^a-zA-Z0-9]/g, '');
+      const piDate = parseSafeDate(pi.invoiceDate || pi.createdAt);
       const grandTotal = Number(pi.grandTotal) || 0;
       const subtotal = Number(pi.subtotal) || 0;
       const totalTax = Number(pi.totalTax) || 0;
       const freightAmt = Number(pi.freight?.amount) || 0;
       const insuranceAmt = Number(pi.insurance?.amount) || 0;
+      const inventoryChargesAmt = Number(pi.inventoryCharges?.amount) || 0;
 
-      const piJvExists = await JournalEntry.findOne({
-        sourceModule: 'purchase_invoice',
-        sourceId: piId
-      });
-
-      if (!piJvExists && grandTotal > 0) {
+      // 2A. Purchase Bill Entry
+      if (grandTotal > 0) {
         const lines = [];
 
         lines.push({
-          account: accMap.get('1030')._id,
+          account: getAcc('1030')._id,
           accountCode: '1030',
-          accountName: accMap.get('1030').name,
+          accountName: getAcc('1030').name,
           debit: subtotal,
           credit: 0,
           description: `Stock receipt on ${piNum} from ${pi.supplierName}`
@@ -376,26 +432,26 @@ const syncAllAutomatedJournals = async () => {
           if (pi.gstType === 'cgst_sgst') {
             const halfTax = Math.round((totalTax / 2) * 100) / 100;
             lines.push({
-              account: accMap.get('1040')._id,
+              account: getAcc('1040')._id,
               accountCode: '1040',
-              accountName: accMap.get('1040').name,
+              accountName: getAcc('1040').name,
               debit: halfTax,
               credit: 0,
               description: 'Input CGST credit'
             });
             lines.push({
-              account: accMap.get('1041')._id,
+              account: getAcc('1041')._id,
               accountCode: '1041',
-              accountName: accMap.get('1041').name,
+              accountName: getAcc('1041').name,
               debit: totalTax - halfTax,
               credit: 0,
               description: 'Input SGST credit'
             });
           } else {
             lines.push({
-              account: accMap.get('1042')._id,
+              account: getAcc('1042')._id,
               accountCode: '1042',
-              accountName: accMap.get('1042').name,
+              accountName: getAcc('1042').name,
               debit: totalTax,
               credit: 0,
               description: 'Input IGST credit'
@@ -405,29 +461,41 @@ const syncAllAutomatedJournals = async () => {
 
         if (freightAmt > 0) {
           lines.push({
-            account: accMap.get('5020')._id,
+            account: getAcc('5020')._id,
             accountCode: '5020',
-            accountName: accMap.get('5020').name,
+            accountName: getAcc('5020').name,
             debit: freightAmt,
             credit: 0,
             description: 'Inward freight expense'
           });
         }
+
         if (insuranceAmt > 0) {
           lines.push({
-            account: accMap.get('5030')._id,
+            account: getAcc('5030')._id,
             accountCode: '5030',
-            accountName: accMap.get('5030').name,
+            accountName: getAcc('5030').name,
             debit: insuranceAmt,
             credit: 0,
             description: 'Transit insurance expense'
           });
         }
 
+        if (inventoryChargesAmt > 0) {
+          lines.push({
+            account: getAcc('5050')._id,
+            accountCode: '5050',
+            accountName: getAcc('5050').name,
+            debit: inventoryChargesAmt,
+            credit: 0,
+            description: 'Inward handling & inventory charges'
+          });
+        }
+
         lines.push({
-          account: accMap.get('2000')._id,
+          account: getAcc('2000')._id,
           accountCode: '2000',
-          accountName: accMap.get('2000').name,
+          accountName: getAcc('2000').name,
           debit: 0,
           credit: grandTotal,
           description: `Payable to ${pi.supplierName}`
@@ -439,30 +507,32 @@ const syncAllAutomatedJournals = async () => {
         if (Math.abs(diff) > 0.001) {
           if (diff > 0) {
             lines.push({
-              account: accMap.get('5080')._id,
+              account: getAcc('5080')._id,
               accountCode: '5080',
-              accountName: accMap.get('5080').name,
+              accountName: getAcc('5080').name,
               debit: 0,
               credit: diff,
-              description: 'Purchase bill round-off'
+              description: 'Purchase bill round-off gain'
             });
           } else {
             lines.push({
-              account: accMap.get('5080')._id,
+              account: getAcc('5080')._id,
               accountCode: '5080',
-              accountName: accMap.get('5080').name,
+              accountName: getAcc('5080').name,
               debit: Math.abs(diff),
               credit: 0,
-              description: 'Purchase bill round-off'
+              description: 'Purchase bill round-off expense'
             });
           }
         }
 
         const totalD = lines.reduce((s, l) => s + l.debit, 0);
         const totalC = lines.reduce((s, l) => s + l.credit, 0);
+        const piJvKey = `JV-PI-${cleanPiNum}`;
 
-        await JournalEntry.create({
-          entryNumber: `JV-PI-${piNum.replace(/[^a-zA-Z0-9]/g, '')}`,
+        const piJvPayload = {
+          entryNumber: piJvKey,
+          voucherNo: piJvKey,
           date: piDate,
           referenceNumber: piNum,
           sourceModule: 'purchase_invoice',
@@ -472,61 +542,90 @@ const syncAllAutomatedJournals = async () => {
           totalDebit: Math.round(totalD * 100) / 100,
           totalCredit: Math.round(totalC * 100) / 100,
           status: 'posted'
-        });
+        };
+
+        await JournalEntry.findOneAndUpdate(
+          { sourceModule: 'purchase_invoice', sourceId: piId },
+          piJvPayload,
+          { upsert: true, new: true }
+        );
       }
 
-      // Vendor payments
-      const piPayments = pi.payments || [];
+      // 2B. ⭐ VENDOR PAYMENTS / DISBURSEMENT ENTRY (FULLY FIXED)
+      let piPayments = (pi.payments && Array.isArray(pi.payments) && pi.payments.length > 0)
+        ? [...pi.payments]
+        : [];
+
+      const isMarkedPaid = String(pi.paymentStatus || '').toLowerCase() === 'paid' ||
+                           String(pi.status || '').toLowerCase() === 'paid';
+
+      const recordedPaid = Number(pi.paidAmount) || 0;
+      const effectivePaidAmount = recordedPaid > 0 ? recordedPaid : (isMarkedPaid ? grandTotal : 0);
+
+      // Fallback: Agar payment status 'paid' hai ya paidAmount > 0 hai aur payments array khali hai
+      if (piPayments.length === 0 && effectivePaidAmount > 0) {
+        piPayments = [{
+          date: pi.invoiceDate || pi.createdAt,
+          amount: effectivePaidAmount,
+          method: 'bank',
+          reference: pi.invoiceNumber
+        }];
+      }
+
       for (let pIdx = 0; pIdx < piPayments.length; pIdx++) {
         const pay = piPayments[pIdx];
         const payAmt = Number(pay.amount) || 0;
         if (payAmt <= 0) continue;
 
-        const payKey = `JV-DSB-${piNum.replace(/[^a-zA-Z0-9]/g, '')}-${pIdx + 1}`;
-        const dsbExists = await JournalEntry.findOne({ entryNumber: payKey });
+        const payKey = `JV-DSB-${cleanPiNum}-${pIdx + 1}`;
+        const payMethodLower = String(pay.method || '').toLowerCase();
+        const bankCode = payMethodLower === 'cash' ? '1000' : '1010';
 
-        if (!dsbExists) {
-          const bankCode = (pay.method === 'cash') ? '1000' : '1010';
-          await JournalEntry.create({
-            entryNumber: payKey,
-            date: pay.date ? new Date(pay.date) : piDate,
-            referenceNumber: pay.reference || piNum,
-            sourceModule: 'payment_disbursement',
-            sourceId: piId,
-            memo: `Disbursement to Supplier: ${pi.supplierName} on ${piNum} (${pay.method})`,
-            lines: [
-              {
-                account: accMap.get('2000')._id,
-                accountCode: '2000',
-                accountName: accMap.get('2000').name,
-                debit: payAmt,
-                credit: 0,
-                description: `Accounts payable settlement for ${piNum}`
-              },
-              {
-                account: accMap.get(bankCode)._id,
-                accountCode: bankCode,
-                accountName: accMap.get(bankCode).name,
-                debit: 0,
-                credit: payAmt,
-                description: `Paid via ${pay.method} [Ref: ${pay.reference || 'None'}]`
-              }
-            ],
-            totalDebit: payAmt,
-            totalCredit: payAmt,
-            status: 'posted'
-          });
-        }
+        const dsbPayload = {
+          entryNumber: payKey,
+          voucherNo: payKey,
+          date: parseSafeDate(pay.date || piDate),
+          referenceNumber: piNum,
+          sourceModule: 'payment_disbursement',
+          sourceId: piId,
+          memo: `Disbursement to Supplier: ${pi.supplierName} on ${piNum} (${pay.method || 'bank'})`,
+          lines: [
+            {
+              account: getAcc('2000')._id,
+              accountCode: '2000',
+              accountName: getAcc('2000').name,
+              debit: payAmt,
+              credit: 0,
+              description: `Accounts payable settlement for ${piNum}`
+            },
+            {
+              account: getAcc(bankCode)._id,
+              accountCode: bankCode,
+              accountName: getAcc(bankCode).name,
+              debit: 0,
+              credit: payAmt,
+              description: `Paid via ${pay.method || 'bank'} [Ref: ${pay.reference || piNum}]`
+            }
+          ],
+          totalDebit: payAmt,
+          totalCredit: payAmt,
+          status: 'posted'
+        };
+
+        await JournalEntry.findOneAndUpdate(
+          { entryNumber: payKey },
+          dsbPayload,
+          { upsert: true, new: true }
+        );
       }
     }
   } catch (err) {
-    console.error('❌ Automated Journal Sync error:', err);
+    console.error('Automated Journal Sync error:', err);
   }
 };
 
-// ============================================
-// 1. MANUAL OR TRIGGERED AUTO-SYNC
-// ============================================
+exports.syncAllAutomatedJournals = syncAllAutomatedJournals;
+
 exports.syncAutomatedJournals = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
@@ -536,9 +635,6 @@ exports.syncAutomatedJournals = async (req, res) => {
   }
 };
 
-// ============================================
-// 2. CHART OF ACCOUNTS
-// ============================================
 exports.initChartOfAccounts = async (req, res) => {
   try {
     const accMap = await getAccountMap();
@@ -607,9 +703,28 @@ exports.updateAccount = async (req, res) => {
   }
 };
 
-// ============================================
-// 3. JOURNAL ENTRIES (WITH AUTOMATIC SYNC & DELETE)
-// ============================================
+exports.deleteAccount = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const account = await Account.findById(id);
+    if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
+
+    if (account.isSystem) {
+      return res.status(400).json({ success: false, message: 'System accounts cannot be deleted.' });
+    }
+
+    const hasEntries = await JournalEntry.exists({ 'lines.account': id });
+    if (hasEntries) {
+      return res.status(400).json({ success: false, message: 'Cannot delete account with existing transactions in ledger. You can mark it inactive instead.' });
+    }
+
+    await account.deleteOne();
+    res.json({ success: true, message: 'Account deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getJournalEntries = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
@@ -624,6 +739,7 @@ exports.getJournalEntries = async (req, res) => {
     if (search) {
       query.$or = [
         { entryNumber: { $regex: search, $options: 'i' } },
+        { voucherNo: { $regex: search, $options: 'i' } },
         { referenceNumber: { $regex: search, $options: 'i' } },
         { memo: { $regex: search, $options: 'i' } },
         { 'lines.accountName': { $regex: search, $options: 'i' } }
@@ -632,12 +748,12 @@ exports.getJournalEntries = async (req, res) => {
 
     if (startDate || endDate) {
       query.date = {};
-      if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) query.date.$lte = new Date(endDate);
+      if (startDate) query.date.$gte = parseSafeDate(startDate);
+      if (endDate) query.date.$lte = parseSafeDate(endDate);
     }
 
     const entries = await JournalEntry.find(query)
-      .populate('lines.account', 'code name type')
+      .populate('lines.account', 'code name type subType')
       .populate('createdBy', 'name')
       .sort({ date: -1, createdAt: -1 })
       .skip((page - 1) * limit)
@@ -655,6 +771,19 @@ exports.getJournalEntries = async (req, res) => {
         pages: Math.ceil(total / limit)
       }
     });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getJournalEntry = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const entry = await JournalEntry.findById(id).populate('lines.account', 'code name type subType');
+    if (!entry) {
+      return res.status(404).json({ success: false, message: 'Journal voucher not found' });
+    }
+    res.json({ success: true, data: entry });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -708,7 +837,8 @@ exports.createJournalEntry = async (req, res) => {
 
     const journal = await JournalEntry.create({
       entryNumber,
-      date: date ? new Date(date) : new Date(),
+      voucherNo: entryNumber,
+      date: parseSafeDate(date),
       referenceNumber: referenceNumber || '',
       sourceModule: 'manual',
       memo: memo || 'Manual Journal Voucher',
@@ -726,7 +856,69 @@ exports.createJournalEntry = async (req, res) => {
   }
 };
 
-// Direct Delete Journal Entry
+exports.updateJournalEntry = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date, referenceNumber, memo, lines, currency } = req.body;
+
+    const jv = await JournalEntry.findById(id);
+    if (!jv) return res.status(404).json({ success: false, message: 'Journal voucher not found' });
+
+    if (!lines || lines.length < 2) {
+      return res.status(400).json({ success: false, message: 'Journal entry requires at least 2 lines (debit & credit).' });
+    }
+
+    let totalDebit = 0;
+    let totalCredit = 0;
+    const enrichedLines = [];
+
+    for (const line of lines) {
+      const d = parseFloat(line.debit) || 0;
+      const c = parseFloat(line.credit) || 0;
+      totalDebit += d;
+      totalCredit += c;
+
+      const acc = await Account.findById(line.account);
+      if (!acc) {
+        return res.status(400).json({ success: false, message: 'Invalid account ID in line item.' });
+      }
+
+      enrichedLines.push({
+        account: acc._id,
+        accountCode: acc.code,
+        accountName: acc.name,
+        debit: Math.round(d * 100) / 100,
+        credit: Math.round(c * 100) / 100,
+        description: line.description || '',
+        entityType: line.entityType || 'Other',
+        entityId: line.entityId || null
+      });
+    }
+
+    if (Math.abs(totalDebit - totalCredit) > 0.05) {
+      return res.status(400).json({
+        success: false,
+        message: `Debit total (${totalDebit.toFixed(2)}) must equal Credit total (${totalCredit.toFixed(2)}).`
+      });
+    }
+
+    if (date) jv.date = parseSafeDate(date);
+    if (referenceNumber !== undefined) jv.referenceNumber = referenceNumber;
+    if (memo !== undefined) jv.memo = memo;
+    if (currency) jv.currency = currency;
+    jv.lines = enrichedLines;
+    jv.totalDebit = Math.round(totalDebit * 100) / 100;
+    jv.totalCredit = Math.round(totalCredit * 100) / 100;
+    jv.voucherNo = jv.entryNumber;
+
+    await jv.save();
+
+    res.json({ success: true, data: jv, message: `Journal entry #${jv.entryNumber} updated successfully.` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.deleteJournalEntry = async (req, res) => {
   try {
     const { id } = req.params;
@@ -740,9 +932,6 @@ exports.deleteJournalEntry = async (req, res) => {
   }
 };
 
-// ============================================
-// 4. GENERAL LEDGER
-// ============================================
 exports.getGeneralLedger = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
@@ -759,8 +948,8 @@ exports.getGeneralLedger = async (req, res) => {
     const dateQuery = { 'lines.account': account._id, status: 'posted' };
     if (startDate || endDate) {
       dateQuery.date = {};
-      if (startDate) dateQuery.date.$gte = new Date(startDate);
-      if (endDate) dateQuery.date.$lte = new Date(endDate);
+      if (startDate) dateQuery.date.$gte = parseSafeDate(startDate);
+      if (endDate) dateQuery.date.$lte = parseSafeDate(endDate);
     }
 
     const entries = await JournalEntry.find(dateQuery).sort({ date: 1, createdAt: 1 });
@@ -778,6 +967,7 @@ exports.getGeneralLedger = async (req, res) => {
         }
 
         ledgerLines.push({
+          voucherId: entry._id,
           date: entry.date,
           entryNumber: entry.entryNumber,
           referenceNumber: entry.referenceNumber,
@@ -805,15 +995,12 @@ exports.getGeneralLedger = async (req, res) => {
   }
 };
 
-// ============================================
-// 5. TRIAL BALANCE
-// ============================================
 exports.getTrialBalance = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
 
     const { asOfDate } = req.query;
-    const dateLimit = asOfDate ? new Date(asOfDate) : new Date();
+    const dateLimit = asOfDate ? parseSafeDate(asOfDate) : new Date();
 
     const accounts = await Account.find({ isActive: true }).sort({ code: 1 });
     const trialLines = [];
@@ -884,14 +1071,11 @@ exports.getTrialBalance = async (req, res) => {
   }
 };
 
-// ============================================
-// 6. PROFIT & LOSS STATEMENT
-// ============================================
 exports.getProfitLoss = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
-    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate ? parseSafeDate(startDate) : new Date(new Date().getFullYear(), 0, 1);
+    const end = endDate ? parseSafeDate(endDate) : new Date();
 
     const [invoices, purchaseInvoices, journalExpenses] = await Promise.all([
       Invoice.find({
@@ -980,13 +1164,11 @@ exports.getProfitLoss = async (req, res) => {
   }
 };
 
-// ============================================
-// 7. BALANCE SHEET
-// ============================================
 exports.getBalanceSheet = async (req, res) => {
   try {
     const { asOfDate } = req.query;
-    const dateLimit = asOfDate ? new Date(asOfDate) : new Date();
+    const dateLimit = asOfDate ? parseSafeDate(asOfDate) : new Date();
+    dateLimit.setHours(23, 59, 59, 999);
 
     const [invoices, purchases, liveInventoryValue, journalLines] = await Promise.all([
       Invoice.find({ date: { $lte: dateLimit }, status: { $ne: 'cancelled' } }),
@@ -1032,7 +1214,7 @@ exports.getBalanceSheet = async (req, res) => {
     const totalCurrentLiabilities = accountsPayable + outputGstPayable;
     const totalLiabilities = totalCurrentLiabilities;
 
-    const ownersEquity = capitalAmount > 0 ? capitalAmount : 500000;
+    const ownersEquity = Math.max(0, capitalAmount);
     const retainedEarnings = totalAssets - totalLiabilities - ownersEquity;
     const totalEquity = ownersEquity + retainedEarnings;
 
@@ -1074,9 +1256,6 @@ exports.getBalanceSheet = async (req, res) => {
   }
 };
 
-// ============================================
-// 8. EXECUTIVE DASHBOARD SUMMARY
-// ============================================
 exports.getAccountingDashboard = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
@@ -1143,9 +1322,6 @@ exports.getAccountingDashboard = async (req, res) => {
   }
 };
 
-// ============================================
-// 9. TAX & FINANCIAL AGING REPORTS
-// ============================================
 exports.getTaxAndFinancialReports = async (req, res) => {
   try {
     const [invoices, purchases] = await Promise.all([
@@ -1177,7 +1353,7 @@ exports.getTaxAndFinancialReports = async (req, res) => {
     invoices.forEach((inv) => {
       const due = Number(inv.dueAmount) || 0;
       if (due > 0) {
-        const invoiceDueDate = inv.dueDate ? new Date(inv.dueDate) : new Date(inv.date);
+        const invoiceDueDate = inv.dueDate ? parseSafeDate(inv.dueDate) : parseSafeDate(inv.date);
         const diffDays = Math.floor((today - invoiceDueDate) / (1000 * 60 * 60 * 24));
 
         if (diffDays <= 0 || diffDays <= 30) receivablesAging.current += due;
@@ -1192,7 +1368,7 @@ exports.getTaxAndFinancialReports = async (req, res) => {
     purchases.forEach((pi) => {
       const due = Number(pi.remainingAmount) || 0;
       if (due > 0) {
-        const dueDate = pi.dueDate ? new Date(pi.dueDate) : new Date(pi.invoiceDate || pi.createdAt);
+        const dueDate = pi.dueDate ? parseSafeDate(pi.dueDate) : parseSafeDate(pi.invoiceDate || pi.createdAt);
         const diffDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
 
         if (diffDays <= 0 || diffDays <= 30) payablesAging.current += due;

@@ -1,3 +1,4 @@
+
 // models/GoodsReceipt.js
 const mongoose = require('mongoose');
 
@@ -30,12 +31,13 @@ const ChargesSchema = new mongoose.Schema({
   taxAmount: { type: Number, default: 0 }
 }, { _id: false });
 
+// ⭐ Expanded enum to support all payment methods safely
 const PaymentSchema = new mongoose.Schema({
   date: { type: String, required: true },
   amount: { type: Number, required: true },
   method: {
     type: String,
-    enum: ['cash', 'bank', 'cheque', 'online', 'adjustment'],
+    enum: ['cash', 'bank', 'cheque', 'online', 'adjustment', 'bank_transfer', 'upi', 'advance', 'other'],
     default: 'bank'
   },
   reference: { type: String, default: '' },
@@ -77,9 +79,10 @@ const ConsolidatedInvoiceSchema = new mongoose.Schema({
     enum: ['pending', 'partial', 'paid'],
     default: 'pending'
   },
+  // ⭐ Added 'partial' to enum to prevent Mongoose validation crash on partial payments
   status: {
     type: String,
-    enum: ['draft', 'generated', 'paid'],
+    enum: ['draft', 'generated', 'paid', 'partial'],
     default: 'draft'
   },
   notes: { type: String, default: '' },
@@ -88,19 +91,6 @@ const ConsolidatedInvoiceSchema = new mongoose.Schema({
   receiptCount: { type: Number, default: 0 }
 }, { timestamps: true });
 
-// Track charges applied to which receipt
-const ChargeAllocationSchema = new mongoose.Schema({
-  grnId: { type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' },
-  grnNumber: { type: String },
-  chargesApplied: { type: Boolean, default: false },
-  charges: {
-    freight: { type: ChargesSchema, default: () => ({}) },
-    insurance: { type: ChargesSchema, default: () => ({}) },
-    inventoryCharges: { type: ChargesSchema, default: () => ({}) }
-  }
-}, { _id: false });
-
-// Add to GoodsReceiptSchema
 const GoodsReceiptSchema = new mongoose.Schema({
   grnNumber: { type: String, required: true, unique: true },
   purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder', required: true },
@@ -135,13 +125,10 @@ const GoodsReceiptSchema = new mongoose.Schema({
   payments: { type: [PaymentSchema], default: [] },
   invoiceGenerated: { type: Boolean, default: false },
   invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' },
-  // Track if charges were applied in this GRN
   chargesApplied: { type: Boolean, default: false },
-  // Reference to consolidated invoice
   consolidatedInvoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' }
 }, { timestamps: true });
 
-// Consolidated Invoice Indexes
 ConsolidatedInvoiceSchema.index({ invoiceNumber: 1 });
 ConsolidatedInvoiceSchema.index({ poNumber: 1 });
 ConsolidatedInvoiceSchema.index({ supplierId: 1 });
