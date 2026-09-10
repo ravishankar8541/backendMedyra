@@ -1,3 +1,4 @@
+// controllers/clientPriceListController.js
 const ClientPriceList = require('../models/ClientPriceList');
 const Product = require('../models/Product');
 const Lead = require('../models/Lead');
@@ -19,13 +20,14 @@ exports.getClientPriceLists = async (req, res) => {
       query.$or = [
         { clientName: { $regex: search, $options: 'i' } },
         { 'items.productName': { $regex: search, $options: 'i' } },
-        { 'items.sku': { $regex: search, $options: 'i' } }
+        { 'items.sku': { $regex: search, $options: 'i' } },
+        { 'items.batchNumber': { $regex: search, $options: 'i' } }
       ];
     }
 
     const lists = await ClientPriceList.find(query)
       .populate('clientId', 'name companyName email phone currency state country')
-      .populate('items.productId', 'name sku unit productType pricing stock status')
+      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory hsnCode')
       .sort({ updatedAt: -1 });
 
     res.json({ success: true, data: lists });
@@ -35,7 +37,7 @@ exports.getClientPriceLists = async (req, res) => {
   }
 };
 
-// GET single price list by clientId (Used by Sales/Proforma)
+// GET single price list by clientId (Used by Sales / Proforma)
 exports.getPriceListByClient = async (req, res) => {
   try {
     const { clientId } = req.params;
@@ -44,6 +46,7 @@ exports.getPriceListByClient = async (req, res) => {
     }
 
     const list = await ClientPriceList.findOne({ clientId, status: 'active' })
+      .populate('clientId', 'name companyName email phone currency')
       .populate('items.productId', 'name sku unit productType pricing stock status batches hsnCode category subCategory');
 
     if (!list) {
@@ -57,7 +60,7 @@ exports.getPriceListByClient = async (req, res) => {
   }
 };
 
-// CREATE or REPLACE full price list for a client
+// CREATE or REPLACE full price list for a client (Allows multiple batches of the same product)
 exports.upsertClientPriceList = async (req, res) => {
   try {
     const { clientId, items = [], notes = '', status = 'active' } = req.body;
@@ -73,8 +76,12 @@ exports.upsertClientPriceList = async (req, res) => {
 
     const cleanItems = [];
     for (const raw of items) {
-      if (!isValidId(raw.productId)) continue;
-      const product = await Product.findById(raw.productId);
+      const rawPid = typeof raw.productId === 'object' && raw.productId !== null
+        ? (raw.productId._id || raw.productId.id)
+        : raw.productId;
+
+      if (!isValidId(rawPid)) continue;
+      const product = await Product.findById(rawPid);
       if (!product) continue;
 
       const sellingPrice = parseFloat(raw.sellingPrice ?? raw.rate);
@@ -83,6 +90,31 @@ exports.upsertClientPriceList = async (req, res) => {
       const defaultQty = Math.max(1, parseInt(raw.defaultQty) || 1);
       const unit = (raw.unit || product.unit || 'Pcs').trim();
       const taxRate = raw.taxRate !== undefined ? parseFloat(raw.taxRate) : (product.pricing?.taxRate || 5);
+      const batchNo = (raw.batchNumber || '').trim();
+      const isBatch = (product.productType || 'batch') !== 'non-batch';
+
+      // ✅ AUTO-REGISTER NEW BATCH IN PRODUCT INVENTORY IF ENTERED
+      if (isBatch && batchNo && batchNo !== 'N/A') {
+        if (!Array.isArray(product.batches)) product.batches = [];
+        const batchExists = product.batches.some(
+          (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
+        );
+
+        if (!batchExists) {
+          product.batches.push({
+            batchNumber: batchNo,
+            quantity: 0,
+            costPrice: product.pricing?.costPrice || 0,
+            mrp: product.pricing?.mrp || 0,
+            sellingPrice: client.currency === 'INR' ? sellingPrice : (product.pricing?.sellingPrice || sellingPrice),
+            addedDate: new Date().toISOString().split('T')[0],
+            addedBy: req.user?.name || 'Client Sales Price List',
+            reason: `Registered via Client Sales Price List (${client.name || client.companyName})`
+          });
+          product.markModified('batches');
+          await product.save();
+        }
+      }
 
       cleanItems.push({
         productId: product._id,
@@ -93,8 +125,8 @@ exports.upsertClientPriceList = async (req, res) => {
         sellingPrice,
         defaultQty,
         taxRate,
-        batchNumber: (raw.batchNumber || '').trim(),
-        isBatchProduct: (product.productType || 'batch') !== 'non-batch',
+        batchNumber: batchNo,
+        isBatchProduct: isBatch,
         notes: (raw.notes || '').trim()
       });
     }
@@ -120,12 +152,12 @@ exports.upsertClientPriceList = async (req, res) => {
 
     const populated = await ClientPriceList.findById(list._id)
       .populate('clientId', 'name companyName email phone currency')
-      .populate('items.productId', 'name sku unit productType pricing stock status');
+      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory');
 
     res.json({
       success: true,
       data: populated,
-      message: `Client price list saved (${cleanItems.length} products)`
+      message: `Client price list saved (${cleanItems.length} items & batches updated)`
     });
   } catch (err) {
     console.error('upsertClientPriceList error:', err);
