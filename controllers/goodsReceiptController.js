@@ -4,55 +4,176 @@ const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 const PurchaseReturn = require('../models/PurchaseReturn');
-const { settleInvoice } = require('../utils/purchaseSettlement');
-const preventReturnedReceiptChanges = async grn => {
-  if (await PurchaseReturn.exists({ 'items.grnId': grn._id, status: 'completed' })) fail('Cancel the linked purchase returns before editing or reversing this receipt/invoice.');
-};
+const { settleInvoice, money } = require('../utils/purchaseSettlement');
 const JournalEntry = require('../models/JournalEntry');
 const nodemailer = require('nodemailer');
 const receiptTransaction = require('../utils/receiptTransaction');
-const { idOf, fail, plain, quantityOf, purchaseLine, syncPurchaseQuantities, validateItem, applyReceiptStock, recalculateReceipt } = require('../utils/grnStock');
-const { syncAllAutomatedJournals } = require('./accountingController'); // ⭐ Instant Sync
+const {
+  idOf,
+  fail,
+  plain,
+  quantityOf,
+  purchaseLine,
+  syncPurchaseQuantities,
+  validateItem,
+  applyReceiptStock,
+  recalculateReceipt
+} = require('../utils/grnStock');
+const { syncAllAutomatedJournals } = require('./accountingController');
+
+// Map already returned quantities for this receipt so edits cannot reduce below what was returned
+const getReturnedQuantityMap = async (grnId) => {
+  const returns = await PurchaseReturn.find({ 'items.grnId': grnId, status: 'completed' });
+  const map = new Map();
+  for (const ret of returns) {
+    for (const item of ret.items) {
+      if (idOf(item.grnId) === idOf(grnId)) {
+        const key = idOf(item.invoiceItemId) || idOf(item.product);
+        map.set(key, (map.get(key) || 0) + Number(item.quantity || 0));
+      }
+    }
+  }
+  return map;
+};
+
+// Safe matcher across GRN items and incoming invoice/update items
+const findMatchingItem = (grnItems, upd, seen) => {
+  const updId = idOf(upd._id);
+  const updPoItemId = idOf(upd.purchaseOrderItemId);
+  const updProdId = idOf(upd.productId?._id || upd.productId || upd.product);
+
+  // 1. Direct _id match
+  let found = grnItems.find((i) => idOf(i._id) === updId && !seen.has(idOf(i._id)));
+  if (found) return found;
+
+  // 2. By purchaseOrderItemId
+  if (updPoItemId) {
+    found = grnItems.find(
+      (i) => idOf(i.purchaseOrderItemId) === updPoItemId && !seen.has(idOf(i._id))
+    );
+    if (found) return found;
+  }
+
+  // 3. By productId AND batchNumber
+  if (updProdId && upd.batchNumber && upd.batchNumber !== 'N/A') {
+    found = grnItems.find(
+      (i) =>
+        idOf(i.productId) === updProdId &&
+        String(i.batchNumber).trim().toLowerCase() ===
+          String(upd.batchNumber).trim().toLowerCase() &&
+        !seen.has(idOf(i._id))
+    );
+    if (found) return found;
+  }
+
+  // 4. By productId alone
+  if (updProdId) {
+    found = grnItems.find((i) => idOf(i.productId) === updProdId && !seen.has(idOf(i._id)));
+    if (found) return found;
+  }
+
+  return null;
+};
 
 // Apply absolute receipt quantities; repeated PUTs never add stock again.
 const updateReceiptItems = async (grn, updates, actor) => {
-  await preventReturnedReceiptChanges(grn);
   if (grn.status !== 'completed') fail('Only completed receipts can be edited.');
+  const returnedMap = await getReturnedQuantityMap(grn._id);
   const seen = new Set();
-  for (const upd of updates) {
-    const item = grn.items.find(item => idOf(item._id) === idOf(upd._id));
-    if (!item || seen.has(idOf(upd._id))) fail('Unknown or duplicate GRN item. Reload the receipt.');
-    seen.add(idOf(upd._id));
+
+  for (let idx = 0; idx < updates.length; idx++) {
+    const upd = updates[idx];
+    let item = findMatchingItem(grn.items, upd, seen);
+
+    // Positional fallback if array aligns
+    if (!item && idx < grn.items.length && !seen.has(idOf(grn.items[idx]._id))) {
+      item = grn.items[idx];
+    }
+
+    if (!item) {
+      fail(`Unknown item: ${upd.productName || 'Product'}. Please reload the invoice.`);
+    }
+    seen.add(idOf(item._id));
+
     const before = plain(item);
     const product = await Product.findById(item.productId);
     if (!product) fail(`Product not found for ${item.productName}.`);
+
     const next = { ...before };
-    for (const field of ['batchNumber', 'mfgDate', 'expDate', 'mrp', 'sellingPrice', 'unitPrice', 'taxRate', 'remarks', 'unit', 'hsn']) {
+    for (const field of [
+      'batchNumber',
+      'mfgDate',
+      'expDate',
+      'mrp',
+      'sellingPrice',
+      'unitPrice',
+      'taxRate',
+      'remarks',
+      'unit',
+      'hsn'
+    ]) {
       if (upd[field] !== undefined) next[field] = upd[field];
     }
     if (upd.receivedQty !== undefined) next.receivedQty = Number(upd.receivedQty);
     next.acceptedQty = next.receivedQty;
-    if (upd.unit !== undefined && !String(upd.unit).trim()) fail('Unit is required.');
-    for (const field of ['mfgDate', 'expDate']) {
-      if (next[field] && !Number.isFinite(Date.parse(next[field]))) fail('Enter a valid manufacturing or expiry date.');
+
+    // Safety: Cannot reduce receivedQty below already returned items
+    const returnedQty =
+      returnedMap.get(idOf(item._id)) || returnedMap.get(idOf(item.productId)) || 0;
+    if (next.receivedQty < returnedQty) {
+      fail(
+        `Quantity for "${item.productName}" cannot be less than returned quantity (${returnedQty}).`
+      );
     }
-    if (next.mfgDate && next.expDate && Date.parse(next.expDate) < Date.parse(next.mfgDate)) fail('Expiry date cannot be before manufacturing date.');
+
+    if (upd.unit !== undefined && !String(upd.unit).trim()) fail('Unit is required.');
+
+    for (const field of ['mfgDate', 'expDate']) {
+      const val = next[field];
+      if (val && val !== 'N/A' && val !== '-' && !Number.isFinite(Date.parse(val))) {
+        fail('Enter a valid manufacturing or expiry date.');
+      }
+    }
+    if (
+      next.mfgDate &&
+      next.expDate &&
+      next.mfgDate !== 'N/A' &&
+      next.expDate !== 'N/A'
+    ) {
+      const mfgTime = Date.parse(next.mfgDate);
+      const expTime = Date.parse(next.expDate);
+      if (Number.isFinite(mfgTime) && Number.isFinite(expTime) && expTime < mfgTime) {
+        fail('Expiry date cannot be before manufacturing date.');
+      }
+    }
+
     applyReceiptStock(product, before, next, grn, actor);
     Object.assign(item, next);
     await product.save();
   }
+
   const po = await PurchaseOrder.findById(grn.purchaseOrder);
-  if (!po) fail('The linked purchase order is missing.');
-  const receipts = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
-  syncPurchaseQuantities(po, receipts.map(receipt => idOf(receipt._id) === idOf(grn._id) ? grn : receipt));
-  await po.save();
+  if (po) {
+    const receipts = await GoodsReceipt.find({
+      purchaseOrder: po._id,
+      status: 'completed'
+    });
+    syncPurchaseQuantities(
+      po,
+      receipts.map((receipt) => (idOf(receipt._id) === idOf(grn._id) ? grn : receipt))
+    );
+    await po.save();
+  }
+
   recalculateReceipt(grn);
   grn.markModified('items');
 };
 
 const reverseReceipt = async (grn, actor) => {
-  await preventReturnedReceiptChanges(grn);
-  if (grn.status !== 'completed') return; // Already reversed: never subtract twice.
+  if (await PurchaseReturn.exists({ 'items.grnId': grn._id, status: 'completed' })) {
+    fail('Cancel linked purchase returns before deleting or reversing this receipt.');
+  }
+  if (grn.status !== 'completed') return;
   for (const item of grn.items) {
     if (quantityOf(item) <= 0) continue;
     const product = await Product.findById(item.productId);
@@ -67,7 +188,10 @@ const reverseReceipt = async (grn, actor) => {
   await grn.save();
   const po = await PurchaseOrder.findById(grn.purchaseOrder);
   if (po) {
-    const remaining = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
+    const remaining = await GoodsReceipt.find({
+      purchaseOrder: po._id,
+      status: 'completed'
+    });
     syncPurchaseQuantities(po, remaining);
     await po.save();
   }
@@ -105,7 +229,7 @@ exports.getPublicInvoiceView = async (req, res) => {
       GBP: '£',
       AED: 'د.إ',
       SAR: '﷼',
-      PKR: '₨',
+      PKR: '₨'
     };
     const symbol = symbols[currency] || currency || '₹';
     const invNo = String(invoice.invoiceNumber || '').replace(/^CI-/i, 'PI-');
@@ -117,7 +241,7 @@ exports.getPublicInvoiceView = async (req, res) => {
         return new Date(d).toLocaleDateString('en-GB', {
           day: '2-digit',
           month: 'short',
-          year: 'numeric',
+          year: 'numeric'
         });
       } catch {
         return d;
@@ -352,7 +476,9 @@ exports.getPublicInvoiceView = async (req, res) => {
     console.error('Public Invoice View error:', err);
     return res
       .status(500)
-      .send('<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;">Error loading Purchase Invoice</h2>');
+      .send(
+        '<h2 style="font-family:sans-serif;text-align:center;margin-top:50px;">Error loading Purchase Invoice</h2>'
+      );
   }
 };
 
@@ -439,18 +565,28 @@ exports.createGRN = async (req, res) => {
       });
     }
 
-    let finalSupplierName = (supplierName && supplierName.trim() !== '' && supplierName !== 'N/A') ? supplierName.trim() : '';
+    let finalSupplierName =
+      supplierName && supplierName.trim() !== '' && supplierName !== 'N/A'
+        ? supplierName.trim()
+        : '';
     if (!finalSupplierName && po) {
-      finalSupplierName = po.supplierName || po.supplier?.companyName || po.supplier?.name || '';
+      finalSupplierName =
+        po.supplierName || po.supplier?.companyName || po.supplier?.name || '';
     }
-    const possibleSupId = supplierId || po?.supplierId || po?.supplier?._id || po?.supplier;
+    const possibleSupId =
+      supplierId || po?.supplierId || po?.supplier?._id || po?.supplier;
     if (!finalSupplierName && possibleSupId) {
       try {
-        const supDoc = await mongoose.connection.collection('suppliers').findOne({
-          _id: mongoose.isValidObjectId(possibleSupId) ? new mongoose.Types.ObjectId(possibleSupId) : possibleSupId
-        });
+        const supDoc = await mongoose.connection
+          .collection('suppliers')
+          .findOne({
+            _id: mongoose.isValidObjectId(possibleSupId)
+              ? new mongoose.Types.ObjectId(possibleSupId)
+              : possibleSupId
+          });
         if (supDoc) {
-          finalSupplierName = supDoc.companyName || supDoc.name || supDoc.supplierName || '';
+          finalSupplierName =
+            supDoc.companyName || supDoc.name || supDoc.supplierName || '';
         }
       } catch (err) {
         console.log('Supplier DB Lookup Error:', err.message);
@@ -464,22 +600,39 @@ exports.createGRN = async (req, res) => {
     if (po.status === 'cancelled') fail('Cannot receive a cancelled purchase order.');
     const requestId = String(req.body.receiptRequestId || '').trim();
     if (requestId) {
-      const previous = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId, receiptRequestIds: requestId });
+      const previous = await GoodsReceipt.findOne({
+        purchaseOrder: purchaseOrderId,
+        receiptRequestIds: requestId
+      });
       if (previous) {
         if (previous.status !== 'completed') fail('This receipt was reversed. Start a new receipt.');
-        return res.status(200).json({ success: true, data: previous, message: 'Receipt already saved.' });
+        return res.status(200).json({
+          success: true,
+          data: previous,
+          message: 'Receipt already saved.'
+        });
       }
     }
-    let existingGRN = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId, status: 'completed' });
-    const receiptContext = existingGRN ? {
-      ...plain(existingGRN), receivedDate: receivedDate || existingGRN.receivedDate
-    } : {
-      _id: new mongoose.Types.ObjectId(), grnNumber: await generateGRNNumber(),
-      purchaseOrder: po._id, poNumber: po.poNumber,
-      supplierName: finalSupplierName, supplierId: possibleSupId,
-      receivedDate: receivedDate || new Date().toISOString().split('T')[0],
-      currency: poCurrency, exchangeRate: effExchangeRate
-    };
+    let existingGRN = await GoodsReceipt.findOne({
+      purchaseOrder: purchaseOrderId,
+      status: 'completed'
+    });
+    const receiptContext = existingGRN
+      ? {
+          ...plain(existingGRN),
+          receivedDate: receivedDate || existingGRN.receivedDate
+        }
+      : {
+          _id: new mongoose.Types.ObjectId(),
+          grnNumber: await generateGRNNumber(),
+          purchaseOrder: po._id,
+          poNumber: po.poNumber,
+          supplierName: finalSupplierName,
+          supplierId: possibleSupId,
+          receivedDate: receivedDate || new Date().toISOString().split('T')[0],
+          currency: poCurrency,
+          exchangeRate: effExchangeRate
+        };
     const lineReceived = new Map();
     const isFirstReceipt = !existingGRN;
 
@@ -508,10 +661,14 @@ exports.createGRN = async (req, res) => {
         });
       }
       if (!product && item.sku) {
-        product = await Product.findOne({ $or: [{ sku: item.sku }, { 'basicInfo.sku': item.sku }] });
+        product = await Product.findOne({
+          $or: [{ sku: item.sku }, { 'basicInfo.sku': item.sku }]
+        });
       }
       if (!product && item.productName) {
-        product = await Product.findOne({ $or: [{ name: item.productName }, { 'basicInfo.name': item.productName }] });
+        product = await Product.findOne({
+          $or: [{ name: item.productName }, { 'basicInfo.name': item.productName }]
+        });
       }
 
       if (!product) fail(`Product not found: ${item.productName || item.productId}`);
@@ -522,13 +679,15 @@ exports.createGRN = async (req, res) => {
         fail('This purchase has been received since you opened it. Select the purchase again.');
       }
       const receivedNow = (lineReceived.get(key) || 0) + receivedQty;
-      if (already + receivedNow > Number(line.quantity)) fail(`Received quantity exceeds pending quantity for ${product.name}.`);
+      if (already + receivedNow > Number(line.quantity)) {
+        fail(`Received quantity exceeds pending quantity for ${product.name}.`);
+      }
       lineReceived.set(key, receivedNow);
       validateItem(item, product);
       const rate = Number(item.unitPrice ?? line.unitPrice) || 0;
       const taxRate = Number(item.taxRate ?? line.taxRate) || 0;
       const itemSubtotal = receivedQty * rate;
-      const itemTax = itemSubtotal * taxRate / 100;
+      const itemTax = (itemSubtotal * taxRate) / 100;
       subtotal += itemSubtotal;
       itemsTax += itemTax;
       const userMfgDate = item.mfgDate || '';
@@ -558,21 +717,37 @@ exports.createGRN = async (req, res) => {
         mfgDate: userMfgDate,
         expDate: userExpDate,
         unitPrice: rate,
-        mrp: rawMrp > 0 ? rawMrp : Number(product.pricing?.mrp || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1),
-        sellingPrice: rawSellingPrice > 0 ? rawSellingPrice : (Number(product.pricing?.sellingPrice || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1) || Number((rate * 1.2).toFixed(2))),
+        mrp:
+          rawMrp > 0
+            ? rawMrp
+            : Number(product.pricing?.mrp || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1),
+        sellingPrice:
+          rawSellingPrice > 0
+            ? rawSellingPrice
+            : Number(product.pricing?.sellingPrice || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1) ||
+              Number((rate * 1.2).toFixed(2)),
         taxRate,
         subtotal: itemSubtotal,
         tax: itemTax,
         totalWithTax: itemSubtotal + itemTax,
         remarks: item.remarks || ''
       };
-      applyReceiptStock(product, null, processedItem, receiptContext, req.user?.name || receivedBy || 'System');
+      applyReceiptStock(
+        product,
+        null,
+        processedItem,
+        receiptContext,
+        req.user?.name || receivedBy || 'System'
+      );
       await product.save();
       processedItems.push(processedItem);
     }
 
     if (processedItems.length === 0) {
-      return res.status(400).json({ success: false, message: 'No valid items with received quantity found' });
+      return res.status(400).json({
+        success: false,
+        message: 'No valid items with received quantity found'
+      });
     }
 
     let payAmt = 0;
@@ -608,17 +783,24 @@ exports.createGRN = async (req, res) => {
       const inventoryData = {
         amount: Number(inventoryCharges?.amount) || 0,
         taxRate: Number(inventoryCharges?.taxRate) || 0,
-        taxAmount: ((Number(inventoryCharges?.amount) || 0) * (Number(inventoryCharges?.taxRate) || 0)) / 100
+        taxAmount:
+          ((Number(inventoryCharges?.amount) || 0) * (Number(inventoryCharges?.taxRate) || 0)) / 100
       };
 
-      const chargesSubtotal = freightData.amount + insuranceData.amount + inventoryData.amount;
-      const chargesTax = freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
+      const chargesSubtotal =
+        freightData.amount + insuranceData.amount + inventoryData.amount;
+      const chargesTax =
+        freightData.taxAmount + insuranceData.taxAmount + inventoryData.taxAmount;
 
       const totalTax = itemsTax + chargesTax;
       const exactTotal = subtotal + chargesSubtotal + totalTax;
       const isInternational = poCurrency && poCurrency !== 'INR';
-      const grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
-      const roundOff = isInternational ? 0 : Number((grandTotal - exactTotal).toFixed(2));
+      const grandTotal = isInternational
+        ? Number(exactTotal.toFixed(2))
+        : Math.round(exactTotal);
+      const roundOff = isInternational
+        ? 0
+        : Number((grandTotal - exactTotal).toFixed(2));
 
       grn = new GoodsReceipt({
         _id: receiptContext._id,
@@ -661,14 +843,13 @@ exports.createGRN = async (req, res) => {
       grn = existingGRN;
       const mergedItems = [...(grn.items || [])];
 
-      // Each delivery retains its batch, rate and stock-lot identity.
       mergedItems.push(...processedItems);
 
       let newSubtotal = 0;
       let newItemsTax = 0;
-      mergedItems.forEach(item => {
-        newSubtotal += (item.subtotal || 0);
-        newItemsTax += (item.tax || 0);
+      mergedItems.forEach((item) => {
+        newSubtotal += item.subtotal || 0;
+        newItemsTax += item.tax || 0;
       });
 
       const cSub = Number(grn.chargesSubtotal || 0);
@@ -682,8 +863,12 @@ exports.createGRN = async (req, res) => {
       const exactTotal = newSubtotal + cSub + newTotalTax;
       const curr = grn.currency || poCurrency;
       const isInternational = curr && curr !== 'INR';
-      grn.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
-      grn.roundOff = isInternational ? 0 : Number((grn.grandTotal - exactTotal).toFixed(2));
+      grn.grandTotal = isInternational
+        ? Number(exactTotal.toFixed(2))
+        : Math.round(exactTotal);
+      grn.roundOff = isInternational
+        ? 0
+        : Number((grn.grandTotal - exactTotal).toFixed(2));
 
       if (paymentEntry) {
         if (!Array.isArray(grn.payments)) grn.payments = [];
@@ -691,7 +876,9 @@ exports.createGRN = async (req, res) => {
         grn.paidAmount = (grn.paidAmount || 0) + payAmt;
       }
 
-      if (grn.paidAmount > grn.grandTotal) overpaymentCredit = grn.paidAmount - grn.grandTotal;
+      if (grn.paidAmount > grn.grandTotal) {
+        overpaymentCredit = grn.paidAmount - grn.grandTotal;
+      }
       grn.receivedDate = receivedDate || grn.receivedDate;
       grn.notes = notes ? `${grn.notes ? grn.notes + ' | ' : ''}${notes}` : grn.notes;
     }
@@ -699,10 +886,17 @@ exports.createGRN = async (req, res) => {
     if (requestId) grn.receiptRequestIds.push(requestId);
     await grn.save();
 
-    const allReceipts = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
+    const allReceipts = await GoodsReceipt.find({
+      purchaseOrder: po._id,
+      status: 'completed'
+    });
     syncPurchaseQuantities(po, allReceipts);
-    if (po.status === 'delivered') po.deliveryDate = receivedDate || new Date().toISOString().split('T')[0];
-    const currentReceipt = allReceipts.find(receipt => idOf(receipt._id) === idOf(grn._id));
+    if (po.status === 'delivered') {
+      po.deliveryDate = receivedDate || new Date().toISOString().split('T')[0];
+    }
+    const currentReceipt = allReceipts.find(
+      (receipt) => idOf(receipt._id) === idOf(grn._id)
+    );
     if (currentReceipt) grn.items = currentReceipt.items;
 
     if (overpaymentCredit > 0) {
@@ -729,7 +923,9 @@ exports.createGRN = async (req, res) => {
         supplierContact: supplierContact || po.supplierContact || '',
         supplierEmail: supplierEmail || po.supplierEmail || '',
         invoiceDate: receivedDate || new Date().toISOString().split('T')[0],
-        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .split('T')[0],
         items: [...grn.items],
         subtotal: grn.subtotal,
         totalTax: grn.totalTax,
@@ -746,7 +942,12 @@ exports.createGRN = async (req, res) => {
         paidAmount: grn.paidAmount || 0,
         payments: grn.payments || [],
         remainingAmount: Math.max(0, grn.grandTotal - (grn.paidAmount || 0)),
-        paymentStatus: (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : (grn.paidAmount > 0 ? 'partial' : 'pending'),
+        paymentStatus:
+          (grn.paidAmount || 0) >= grn.grandTotal
+            ? 'paid'
+            : grn.paidAmount > 0
+            ? 'partial'
+            : 'pending',
         status: (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated',
         notes: notes || '',
         createdBy: req.user?.id || req.user?._id,
@@ -766,9 +967,18 @@ exports.createGRN = async (req, res) => {
       existingInvoice.insurance = grn.insurance;
       existingInvoice.inventoryCharges = grn.inventoryCharges;
       existingInvoice.paidAmount = grn.paidAmount || 0;
-      existingInvoice.remainingAmount = Math.max(0, grn.grandTotal - (grn.paidAmount || 0));
-      existingInvoice.paymentStatus = (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : (grn.paidAmount > 0 ? 'partial' : 'pending');
-      existingInvoice.status = (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated';
+      existingInvoice.remainingAmount = Math.max(
+        0,
+        grn.grandTotal - (grn.paidAmount || 0)
+      );
+      existingInvoice.paymentStatus =
+        (grn.paidAmount || 0) >= grn.grandTotal
+          ? 'paid'
+          : grn.paidAmount > 0
+          ? 'partial'
+          : 'pending';
+      existingInvoice.status =
+        (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated';
       existingInvoice.payments = grn.payments || [];
       existingInvoice.receiptCount = (existingInvoice.receiptCount || 0) + 1;
       settleInvoice(existingInvoice);
@@ -801,8 +1011,6 @@ exports.updateGRN = async (req, res) => {
     if (!grn) {
       return res.status(404).json({ success: false, message: 'GRN not found' });
     }
-
-    await preventReturnedReceiptChanges(grn);
 
     const {
       items,
@@ -865,7 +1073,12 @@ exports.updateGRN = async (req, res) => {
       inv.items = grn.items;
       inv.gstType = grn.gstType;
       inv.remainingAmount = Math.max(0, inv.grandTotal - (Number(inv.paidAmount) || 0));
-      inv.paymentStatus = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : (inv.paidAmount > 0 ? 'partial' : 'pending');
+      inv.paymentStatus =
+        (inv.paidAmount || 0) >= inv.grandTotal
+          ? 'paid'
+          : inv.paidAmount > 0
+          ? 'partial'
+          : 'pending';
       inv.status = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : 'generated';
       settleInvoice(inv);
       await inv.save();
@@ -892,8 +1105,6 @@ exports.updateConsolidatedInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
     }
 
-    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before editing this invoice.');
-
     const {
       dueDate,
       notes,
@@ -910,9 +1121,21 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     } = req.body;
 
     for (const charge of [freight, insurance, inventoryCharges]) {
-      if (charge && (!Number.isFinite(Number(charge.amount)) || Number(charge.amount) < 0 || !Number.isFinite(Number(charge.taxRate)) || Number(charge.taxRate) < 0 || Number(charge.taxRate) > 100)) fail('Charges must be non-negative and GST must be between 0 and 100%.');
+      if (
+        charge &&
+        (!Number.isFinite(Number(charge.amount)) ||
+          Number(charge.amount) < 0 ||
+          !Number.isFinite(Number(charge.taxRate)) ||
+          Number(charge.taxRate) < 0 ||
+          Number(charge.taxRate) > 100)
+      ) {
+        fail('Charges must be non-negative and GST must be between 0 and 100%.');
+      }
     }
-    if (gstType !== undefined && !['igst', 'cgst_sgst'].includes(gstType)) fail('Invalid GST type.');
+
+    if (gstType !== undefined && !['igst', 'cgst_sgst'].includes(gstType)) {
+      fail('Invalid GST type.');
+    }
     if (dueDate !== undefined) invoice.dueDate = dueDate;
     if (notes !== undefined) invoice.notes = notes;
     if (invoiceDate !== undefined) invoice.invoiceDate = invoiceDate;
@@ -922,16 +1145,66 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     if (supplierAddress !== undefined) invoice.supplierAddress = supplierAddress;
     if (gstType !== undefined) invoice.gstType = gstType;
 
+    // Resilient GRN lookup (via grnIds, consolidatedInvoiceId, invoiceId, or purchaseOrder)
+    let grn = null;
+    if (invoice.grnIds && invoice.grnIds.length > 0) {
+      grn = await GoodsReceipt.findOne({ _id: { $in: invoice.grnIds }, status: 'completed' });
+    }
+    if (!grn) {
+      grn = await GoodsReceipt.findOne({
+        $or: [{ consolidatedInvoiceId: invoice._id }, { invoiceId: invoice._id }],
+        status: 'completed'
+      });
+    }
+    if (!grn && invoice.purchaseOrder) {
+      grn = await GoodsReceipt.findOne({
+        purchaseOrder: invoice.purchaseOrder,
+        status: 'completed'
+      });
+    }
+
     if (Array.isArray(items)) {
-      const grn = await GoodsReceipt.findOne({ consolidatedInvoiceId: invoice._id, status: 'completed' });
-      if (!grn) fail('A completed GRN is required to edit received invoice items.');
-      await updateReceiptItems(grn, items.map(item => ({
-        ...item, receivedQty: item.acceptedQty ?? item.receivedQty ?? item.quantity
-      })), req.user?.name || 'System');
-      await grn.save();
-      invoice.items = grn.items;
-      invoice.subtotal = grn.subtotal;
-      invoice.totalTax = grn.items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
+      if (grn) {
+        await updateReceiptItems(
+          grn,
+          items.map((item) => ({
+            ...item,
+            receivedQty: item.acceptedQty ?? item.receivedQty ?? item.quantity
+          })),
+          req.user?.name || 'System'
+        );
+        await grn.save();
+
+        invoice.items = grn.items;
+        invoice.subtotal = grn.subtotal;
+        invoice.totalTax = grn.items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
+      } else {
+        // Fallback for standalone/legacy invoices without active GRN
+        let subtotal = 0;
+        let itemsTax = 0;
+        invoice.items = items.map((item) => {
+          const qty = Number(item.acceptedQty ?? item.receivedQty ?? item.quantity ?? 0);
+          const rate = Number(item.unitPrice || item.rate || 0);
+          const taxRate = Number(item.taxRate || 0);
+          const lineSub = qty * rate;
+          const lineTax = (lineSub * taxRate) / 100;
+          subtotal += lineSub;
+          itemsTax += lineTax;
+          return {
+            ...item,
+            receivedQty: qty,
+            acceptedQty: qty,
+            quantity: qty,
+            unitPrice: rate,
+            taxRate,
+            subtotal: lineSub,
+            tax: lineTax,
+            totalWithTax: lineSub + lineTax
+          };
+        });
+        invoice.subtotal = subtotal;
+        invoice.totalTax = itemsTax;
+      }
     }
 
     if (freight) {
@@ -961,36 +1234,48 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 
     invoice.chargesSubtotal = cSub;
     invoice.chargesTax = cTax;
-    invoice.totalTax = invoice.items.reduce((sum, item) => sum + Number(item.tax || 0), 0) + cTax;
+    invoice.totalTax =
+      invoice.items.reduce((sum, item) => sum + Number(item.tax || 0), 0) + cTax;
 
     const exactTotal = (Number(invoice.subtotal) || 0) + cSub + invoice.totalTax;
     const isInternational = invoice.currency && invoice.currency !== 'INR';
     invoice.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
-    invoice.roundOff = isInternational ? 0 : Number((invoice.grandTotal - exactTotal).toFixed(2));
+    invoice.roundOff = isInternational
+      ? 0
+      : Number((invoice.grandTotal - exactTotal).toFixed(2));
 
-    invoice.remainingAmount = Math.max(0, invoice.grandTotal - (Number(invoice.paidAmount) || 0));
-    invoice.paymentStatus = (invoice.paidAmount || 0) >= invoice.grandTotal ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
+    const returnCredit = Number(invoice.returnCredit || 0);
+    const paidAmt = Number(invoice.paidAmount) || 0;
+    invoice.remainingAmount = Math.max(0, invoice.grandTotal - returnCredit - paidAmt);
+    invoice.paymentStatus =
+      paidAmt + returnCredit >= invoice.grandTotal
+        ? 'paid'
+        : paidAmt > 0
+        ? 'partial'
+        : 'pending';
     invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
 
     settleInvoice(invoice);
+    invoice.markModified('items');
     await invoice.save();
 
-    if (invoice.grnIds && invoice.grnIds.length > 0) {
-      const grn = await GoodsReceipt.findById(invoice.grnIds[0]);
-      if (grn) {
-        grn.subtotal = invoice.subtotal;
-        grn.totalTax = invoice.totalTax;
-        grn.chargesSubtotal = invoice.chargesSubtotal;
-        grn.chargesTax = invoice.chargesTax;
-        grn.roundOff = invoice.roundOff;
-        grn.grandTotal = invoice.grandTotal;
-        grn.freight = invoice.freight;
-        grn.insurance = invoice.insurance;
-        grn.inventoryCharges = invoice.inventoryCharges;
-        grn.items = invoice.items;
-        grn.gstType = invoice.gstType;
-        await grn.save();
-      }
+    // Mirror synced totals back to the GRN
+    if (grn) {
+      grn.subtotal = invoice.subtotal;
+      grn.totalTax = invoice.totalTax;
+      grn.chargesSubtotal = invoice.chargesSubtotal;
+      grn.chargesTax = invoice.chargesTax;
+      grn.roundOff = invoice.roundOff;
+      grn.grandTotal = invoice.grandTotal;
+      grn.freight = invoice.freight;
+      grn.insurance = invoice.insurance;
+      grn.inventoryCharges = invoice.inventoryCharges;
+      grn.items = invoice.items;
+      grn.gstType = invoice.gstType;
+      if (!grn.consolidatedInvoiceId) grn.consolidatedInvoiceId = invoice._id;
+      if (!grn.invoiceId) grn.invoiceId = invoice._id;
+      grn.markModified('items');
+      await grn.save();
     }
 
     res.json({
@@ -1009,7 +1294,12 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 // ============================================
 exports.deleteConsolidatedInvoice = async (req, res) => {
   try {
-    const invoiceId = req.params.invoiceId || req.params.id || req.query.invoiceId || req.query.id || req.body.invoiceId;
+    const invoiceId =
+      req.params.invoiceId ||
+      req.params.id ||
+      req.query.invoiceId ||
+      req.query.id ||
+      req.body.invoiceId;
     if (!invoiceId || !mongoose.isValidObjectId(invoiceId)) {
       return res.status(400).json({ success: false, message: 'Valid Invoice ID is required' });
     }
@@ -1020,16 +1310,13 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
     }
 
     await JournalEntry.deleteMany({
-      $or: [
-        { sourceId: invoice._id },
-        { referenceNumber: invoice.invoiceNumber }
-      ]
+      $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }]
     });
 
     const grnIds = invoice.grnIds || (invoice.grnId ? [invoice.grnId] : []);
     if ((!grnIds || grnIds.length === 0) && invoice._id) {
       const linked = await GoodsReceipt.find({ consolidatedInvoiceId: invoice._id }).select('_id');
-      linked.forEach(g => grnIds.push(g._id));
+      linked.forEach((g) => grnIds.push(g._id));
     }
 
     for (const grnId of grnIds) {
@@ -1037,12 +1324,15 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
       if (grn) await reverseReceipt(grn, req.user?.name || 'System');
     }
 
-    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before deleting this invoice.');
+    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) {
+      fail('Cancel linked purchase returns before deleting this invoice.');
+    }
     await invoice.deleteOne();
 
     return res.json({
       success: true,
-      message: 'Purchase Invoice and corresponding double-entry accounting journals deleted successfully. Stock reversed.'
+      message:
+        'Purchase Invoice and corresponding double-entry accounting journals deleted successfully. Stock reversed.'
     });
   } catch (error) {
     console.error('❌ Delete Invoice error:', error);
@@ -1051,16 +1341,27 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
 };
 
 // ============================================
-// ⭐ ADD PAYMENT (REAL-TIME AUTO-JOURNAL SYNC FIX)
+// ADD PAYMENT
 // ============================================
 exports.addPayment = async (req, res) => {
   try {
     const id = req.params.id || req.params.grnId || req.params.invoiceId;
-    const { date, paymentDate, amount, method, paymentMethod, reference, transactionId, notes } = req.body;
+    const {
+      date,
+      paymentDate,
+      amount,
+      method,
+      paymentMethod,
+      reference,
+      transactionId,
+      notes
+    } = req.body;
 
     const paymentAmount = Number(amount) || 0;
     if (paymentAmount <= 0) {
-      return res.status(400).json({ success: false, message: 'Payment amount must be greater than 0' });
+      return res
+        .status(400)
+        .json({ success: false, message: 'Payment amount must be greater than 0' });
     }
 
     let grn = null;
@@ -1069,19 +1370,29 @@ exports.addPayment = async (req, res) => {
     if (mongoose.isValidObjectId(id)) {
       grn = await GoodsReceipt.findById(id);
       if (grn) {
-        if (grn.consolidatedInvoiceId) invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
-        if (!invoice) invoice = await ConsolidatedInvoice.findOne({ purchaseOrder: grn.purchaseOrder });
+        if (grn.consolidatedInvoiceId) {
+          invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+        }
+        if (!invoice) {
+          invoice = await ConsolidatedInvoice.findOne({ purchaseOrder: grn.purchaseOrder });
+        }
       } else {
         invoice = await ConsolidatedInvoice.findById(id);
-        if (invoice) grn = await GoodsReceipt.findOne({ consolidatedInvoiceId: invoice._id });
+        if (invoice) {
+          grn = await GoodsReceipt.findOne({ consolidatedInvoiceId: invoice._id });
+        }
       }
     }
 
     if (!grn && !invoice) {
-      return res.status(404).json({ success: false, message: 'Goods Receipt or Invoice record not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: 'Goods Receipt or Invoice record not found' });
     }
 
-    const cleanMethod = (method || paymentMethod || 'bank').toLowerCase().replace(/\s+/g, '_');
+    const cleanMethod = (method || paymentMethod || 'bank')
+      .toLowerCase()
+      .replace(/\s+/g, '_');
     const paymentEntry = {
       date: date || paymentDate || new Date().toISOString().split('T')[0],
       amount: paymentAmount,
@@ -1103,7 +1414,12 @@ exports.addPayment = async (req, res) => {
       invoice.payments.push(paymentEntry);
       invoice.paidAmount = (Number(invoice.paidAmount) || 0) + paymentAmount;
       invoice.remainingAmount = Math.max(0, (invoice.grandTotal || 0) - invoice.paidAmount);
-      invoice.paymentStatus = invoice.remainingAmount <= 0 ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
+      invoice.paymentStatus =
+        invoice.remainingAmount <= 0
+          ? 'paid'
+          : invoice.paidAmount > 0
+          ? 'partial'
+          : 'pending';
       invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
       settleInvoice(invoice);
       await invoice.save();
@@ -1127,7 +1443,15 @@ exports.addConsolidatedPayment = exports.addPayment;
 // ============================================
 exports.getConsolidatedInvoices = async (req, res) => {
   try {
-    const { page = 1, limit = 15, search, supplierId, paymentStatus, startDate, endDate } = req.query;
+    const {
+      page = 1,
+      limit = 15,
+      search,
+      supplierId,
+      paymentStatus,
+      startDate,
+      endDate
+    } = req.query;
     const query = {};
     if (search) {
       query.$or = [
@@ -1169,8 +1493,19 @@ exports.getConsolidatedInvoices = async (req, res) => {
     res.json({
       success: true,
       data: invoices,
-      stats: stats[0] || { totalInvoices: 0, totalValue: 0, totalPaid: 0, totalRemaining: 0, totalReceipts: 0 },
-      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
+      stats: stats[0] || {
+        totalInvoices: 0,
+        totalValue: 0,
+        totalPaid: 0,
+        totalRemaining: 0,
+        totalReceipts: 0
+      },
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1185,7 +1520,9 @@ exports.getConsolidatedInvoice = async (req, res) => {
       .populate('purchaseOrder', 'poNumber status expectedDate creditAmount');
 
     if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
-    const grns = await GoodsReceipt.find({ consolidatedInvoiceId: invoice._id }).select('grnNumber receivedDate items subtotal grandTotal status');
+    const grns = await GoodsReceipt.find({ consolidatedInvoiceId: invoice._id }).select(
+      'grnNumber receivedDate items subtotal grandTotal status'
+    );
 
     res.json({ success: true, data: { ...invoice.toObject(), grns } });
   } catch (error) {
@@ -1198,7 +1535,15 @@ exports.getConsolidatedInvoice = async (req, res) => {
 // ============================================
 exports.getGRNs = async (req, res) => {
   try {
-    const { page = 1, limit = 15, search, startDate, endDate, supplierId, status } = req.query;
+    const {
+      page = 1,
+      limit = 15,
+      search,
+      startDate,
+      endDate,
+      supplierId,
+      status
+    } = req.query;
     const query = {};
     if (search) {
       query.$or = [
@@ -1241,7 +1586,12 @@ exports.getGRNs = async (req, res) => {
       success: true,
       data: grns,
       stats: stats[0] || { totalGRNs: 0, totalItems: 0, totalValue: 0, avgValue: 0 },
-      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1254,12 +1604,17 @@ exports.getGRN = async (req, res) => {
       .populate('createdBy', 'name email')
       .populate('purchaseOrder', 'poNumber status expectedDate items total creditAmount')
       .populate('supplierId', 'companyName gstNumber phone email address')
-      .populate('consolidatedInvoiceId', 'invoiceNumber paymentStatus payments grandTotal paidAmount remainingAmount');
+      .populate(
+        'consolidatedInvoiceId',
+        'invoiceNumber paymentStatus payments grandTotal paidAmount remainingAmount'
+      );
 
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });
     const po = grn.purchaseOrder;
-    const totalOrdered = po?.items?.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0) || 0;
-    const totalReceived = po?.items?.reduce((sum, i) => sum + (Number(i.receivedQty) || 0), 0) || 0;
+    const totalOrdered =
+      po?.items?.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0) || 0;
+    const totalReceived =
+      po?.items?.reduce((sum, i) => sum + (Number(i.receivedQty) || 0), 0) || 0;
 
     res.json({
       success: true,
@@ -1271,7 +1626,8 @@ exports.getGRN = async (req, res) => {
           totalOrdered,
           totalReceived,
           remainingQty: totalOrdered - totalReceived,
-          receivedPercentage: totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0,
+          receivedPercentage:
+            totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0,
           poGrandTotal: po?.total || 0,
           creditAmount: po?.creditAmount || 0
         }
@@ -1291,28 +1647,34 @@ exports.deleteGRN = async (req, res) => {
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });
 
     await JournalEntry.deleteMany({
-      $or: [
-        { sourceId: grn._id },
-        { referenceNumber: grn.grnNumber }
-      ]
+      $or: [{ sourceId: grn._id }, { referenceNumber: grn.grnNumber }]
     });
 
     const invoiceId = grn.consolidatedInvoiceId || grn.invoiceId;
     if (invoiceId) {
       const invoice = await ConsolidatedInvoice.findById(invoiceId);
-      if (invoice && invoice.grnIds.some(id => idOf(id) !== idOf(grn._id))) {
-        fail('This legacy invoice links multiple GRNs. Reverse it from Purchase Invoices to keep accounting consistent.');
+      if (invoice && invoice.grnIds.some((id) => idOf(id) !== idOf(grn._id))) {
+        fail(
+          'This legacy invoice links multiple GRNs. Reverse it from Purchase Invoices to keep accounting consistent.'
+        );
       }
       if (invoice) {
-        await JournalEntry.deleteMany({ $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }] });
-        if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before deleting this invoice.');
-    await invoice.deleteOne();
+        await JournalEntry.deleteMany({
+          $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }]
+        });
+        if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) {
+          fail('Cancel linked purchase returns before deleting this invoice.');
+        }
+        await invoice.deleteOne();
       }
     }
     await reverseReceipt(grn, req.user?.name || 'System');
 
     await grn.deleteOne();
-    res.json({ success: true, message: 'GRN and linked journals deleted successfully with stock reversal' });
+    res.json({
+      success: true,
+      message: 'GRN and linked journals deleted successfully with stock reversal'
+    });
   } catch (error) {
     throw error;
   }
@@ -1323,28 +1685,68 @@ exports.deleteGRN = async (req, res) => {
 // ============================================
 exports.getReceiptDashboard = async (req, res) => {
   try {
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const [totalGRNs, weeklyGRNs, bySupplier, recentGRNs, poStatus, invoiceStats, consolidatedInvoices] = await Promise.all([
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split('T')[0];
+    const [
+      totalGRNs,
+      weeklyGRNs,
+      bySupplier,
+      recentGRNs,
+      poStatus,
+      invoiceStats,
+      consolidatedInvoices
+    ] = await Promise.all([
       GoodsReceipt.countDocuments(),
       GoodsReceipt.countDocuments({ receivedDate: { $gte: weekAgo } }),
       GoodsReceipt.aggregate([
-        { $group: { _id: '$supplierName', count: { $sum: 1 }, total: { $sum: '$grandTotal' } } },
+        {
+          $group: {
+            _id: '$supplierName',
+            count: { $sum: 1 },
+            total: { $sum: '$grandTotal' }
+          }
+        },
         { $sort: { count: -1 } },
         { $limit: 10 }
       ]),
-      GoodsReceipt.find().sort({ createdAt: -1 }).limit(10).populate('supplierId', 'companyName'),
+      GoodsReceipt.find()
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .populate('supplierId', 'companyName'),
       PurchaseOrder.aggregate([
-        { $group: { _id: '$status', count: { $sum: 1 }, avgReceived: { $avg: '$receivedPercentage' } } }
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            avgReceived: { $avg: '$receivedPercentage' }
+          }
+        }
       ]),
       ConsolidatedInvoice.aggregate([
-        { $group: { _id: '$paymentStatus', count: { $sum: 1 }, total: { $sum: '$grandTotal' } } }
+        {
+          $group: {
+            _id: '$paymentStatus',
+            count: { $sum: 1 },
+            total: { $sum: '$grandTotal' }
+          }
+        }
       ]),
       ConsolidatedInvoice.aggregate([
-        { $group: { _id: null, total: { $sum: 1 }, totalValue: { $sum: '$grandTotal' }, avgReceipts: { $avg: '$receiptCount' } } }
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            totalValue: { $sum: '$grandTotal' },
+            avgReceipts: { $avg: '$receiptCount' }
+          }
+        }
       ])
     ]);
 
-    const totalValue = await GoodsReceipt.aggregate([{ $group: { _id: null, total: { $sum: '$grandTotal' } } }]);
+    const totalValue = await GoodsReceipt.aggregate([
+      { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+    ]);
 
     res.json({
       success: true,
@@ -1356,7 +1758,11 @@ exports.getReceiptDashboard = async (req, res) => {
         recentGRNs,
         poStatus,
         invoiceStats,
-        consolidatedInvoices: consolidatedInvoices[0] || { total: 0, totalValue: 0, avgReceipts: 0 }
+        consolidatedInvoices: consolidatedInvoices[0] || {
+          total: 0,
+          totalValue: 0,
+          avgReceipts: 0
+        }
       }
     });
   } catch (error) {
@@ -1473,7 +1879,14 @@ exports.sendPurchaseInvoiceEmail = async (req, res) => {
 };
 
 // Commit receipt, stock, purchase and invoice changes as one operation.
-for (const name of ['addPayment', 'createGRN', 'updateGRN', 'updateConsolidatedInvoice', 'deleteGRN', 'deleteConsolidatedInvoice']) {
+for (const name of [
+  'addPayment',
+  'createGRN',
+  'updateGRN',
+  'updateConsolidatedInvoice',
+  'deleteGRN',
+  'deleteConsolidatedInvoice'
+]) {
   exports[name] = receiptTransaction(exports[name], syncAllAutomatedJournals);
 }
 

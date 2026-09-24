@@ -31,6 +31,10 @@ const PurchaseReturnItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  replacedQty: {
+    type: Number,
+    default: 0
+  },
   unit: {
     type: String,
     default: 'Pcs'
@@ -57,6 +61,32 @@ const PurchaseReturnItemSchema = new mongoose.Schema({
     default: 'Return to supplier'
   }
 });
+
+const ReplacementHistorySchema = new mongoose.Schema({
+  receivedDate: {
+    type: String,
+    default: () => new Date().toISOString().slice(0, 10)
+  },
+  receivedBy: {
+    type: String,
+    default: 'System'
+  },
+  notes: {
+    type: String,
+    default: ''
+  },
+  items: [
+    {
+      productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+      productName: String,
+      quantity: Number,
+      batchNumber: String,
+      mfgDate: String,
+      expDate: String,
+      unit: String
+    }
+  ]
+}, { timestamps: true });
 
 const PurchaseReturnSchema = new mongoose.Schema(
   {
@@ -119,6 +149,15 @@ const PurchaseReturnSchema = new mongoose.Schema(
       type: [PurchaseReturnItemSchema],
       default: []
     },
+    replacementStatus: {
+      type: String,
+      enum: ['none', 'pending', 'partial', 'received'],
+      default: 'pending'
+    },
+    replacementHistory: {
+      type: [ReplacementHistorySchema],
+      default: []
+    },
     currency: {
       type: String,
       default: 'INR'
@@ -172,5 +211,6 @@ const PurchaseReturnSchema = new mongoose.Schema(
 
 PurchaseReturnSchema.index({ requestId: 1 }, { unique: true, sparse: true });
 PurchaseReturnSchema.index({ invoice: 1, status: 1 });
+PurchaseReturnSchema.index({ returnNumber: 1 });
 
 module.exports = mongoose.models.PurchaseReturn || mongoose.model('PurchaseReturn', PurchaseReturnSchema);

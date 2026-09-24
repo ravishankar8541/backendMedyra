@@ -1,3 +1,4 @@
+// routes/purchaseReturnRoutes.js
 const express = require('express');
 const router = express.Router();
 const { protect, restrictTo } = require('../middleware/auth');
@@ -6,20 +7,32 @@ const {
   getReturnSource,
   cancelPurchaseReturn,
   createPurchaseReturn,
+  updatePurchaseReturn,
+  receiveReplacement,
   getPurchaseReturns,
   getPurchaseReturn,
-  deletePurchaseReturn
+  deletePurchaseReturn,
+  getPublicDebitNoteView
 } = require('../controllers/purchaseReturnController');
 
-router.get('/source/:invoiceId', protect, restrictTo('admin', 'manager'), getReturnSource);
-router.post('/:id/cancel', protect, restrictTo('admin', 'manager'), cancelPurchaseReturn);
+// Public Debit Note View (no login required for direct print or sharing)
+router.get('/public-view/:id', getPublicDebitNoteView);
 
-router.route('/')
-  .post(protect, restrictTo('admin', 'manager'), createPurchaseReturn)
-  .get(protect, getPurchaseReturns);
+router.use(protect);
 
-router.route('/:id')
-  .get(protect, getPurchaseReturn)
-  .delete(protect, restrictTo('admin'), deletePurchaseReturn);
+router.get('/source/:invoiceId', restrictTo('admin', 'manager'), getReturnSource);
+router.post('/:id/cancel', restrictTo('admin', 'manager'), cancelPurchaseReturn);
+router.post('/:id/replacement', restrictTo('admin', 'manager'), receiveReplacement);
+
+router
+  .route('/')
+  .post(restrictTo('admin', 'manager'), createPurchaseReturn)
+  .get(getPurchaseReturns);
+
+router
+  .route('/:id')
+  .get(getPurchaseReturn)
+  .put(restrictTo('admin', 'manager'), updatePurchaseReturn)
+  .delete(restrictTo('admin', 'manager'), deletePurchaseReturn);
 
 module.exports = router;
