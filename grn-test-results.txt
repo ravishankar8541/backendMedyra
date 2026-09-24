@@ -1,0 +1,231 @@
+◇ injected env (25) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+✔ vendor price list and purchase do not register or require batches (1126.607ms)
+✔ 100 + 50 receipts retain separate batches, quantities, payments and journals (461.6181ms)
+✔ batch-only edits and repeated edits affect only the linked stock lot (287.456ms)
+❌ Create GRN error: Error: Batch number is required for Product 8.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at validateItem (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:71:5)
+    at exports.createGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:527:7)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3)
+    at async TestContext.<anonymous> (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:140:20) {
+  status: 400
+}
+❌ Create GRN error: Error: Received quantity exceeds pending quantity for Product 8.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at exports.createGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:525:58)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3)
+    at async TestContext.<anonymous> (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:140:20)
+    at async Test.run (node:internal/test_runner/test:1389:7) {
+  status: 400
+}
+❌ Create GRN error: Error: GoodsReceipt validation failed: payments.0.method: `invalid` is not a valid enum value for path `method`.
+    at ValidationError.inspect (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\error\validation.js:52:26)
+    at formatValue (node:internal/util/inspect:897:19)
+    at inspect (node:internal/util/inspect:409:10)
+    at formatWithOptionsInternal (node:internal/util/inspect:2652:40)
+    at formatWithOptions (node:internal/util/inspect:2514:10)
+    at console.value (node:internal/console/constructor:377:14)
+    at console.error (node:internal/console/constructor:444:61)
+    at exports.createGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:790:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9 {
+  errors: {
+    'payments.0.method': ValidatorError: `invalid` is not a valid enum value for path `method`.
+        at validate (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\schemaType.js:1440:13)
+        at SchemaType.doValidate (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\schemaType.js:1424:7)
+        at C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\document.js:3140:18
+        at process.processTicksAndRejections (node:internal/process/task_queues:85:11) {
+      properties: [Object],
+      kind: 'enum',
+      path: 'method',
+      value: 'invalid',
+      reason: undefined,
+      Symbol(mongoose#validatorError): true
+    }
+  },
+  _message: 'GoodsReceipt validation failed'
+}
+❌ Create GRN error: Error: This purchase has been received since you opened it. Select the purchase again.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at exports.createGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:522:9)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3)
+    at async TestContext.<anonymous> (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:146:17)
+    at async Test.run (node:internal/test_runner/test:1389:7) {
+  status: 400
+}
+✔ invalid batch, over-receipt, stale form and failed payment roll back all stock changes (148.2755ms)
+❌ Update GRN error: Error: Cannot reduce Product 14: received stock has been sold or reserved.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at applyReceiptStock (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:112:53)
+    at updateReceiptItems (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:40:5)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async exports.updateGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:841:31)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3) {
+  status: 400
+}
+✔ receipt reductions protect stock already sold or reserved (101.5033ms)
+✔ non-batch receiving, zero quantity correction and deletion stay consistent (214.6168ms)
+✔ invoice reversal cannot subtract stock twice and allows a fresh receipt (286.3275ms)
+✔ invoice corrections preserve stock identity and update receipt stock (201.1232ms)
+✔ purchase editing preserves line IDs and received quantities (96.137ms)
+❌ Create GRN error: MongoServerError: Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction.
+    at Connection.sendCommand (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\cmap\connection.js:306:27)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Connection.command (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\cmap\connection.js:334:26)
+    at async Server.command (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sdam\server.js:194:29)
+    at async tryOperation (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\operations\execute_operation.js:213:32)
+    at async executeOperation (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\operations\execute_operation.js:78:16)
+    at async Collection.updateOne (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\collection.js:238:16) {
+  errorLabelSet: Set(1) { 'TransientTransactionError' },
+  errorResponse: {
+    errorLabels: [ 'TransientTransactionError' ],
+    ok: 0,
+    errmsg: 'Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction.',
+    code: 112,
+    codeName: 'WriteConflict',
+    '$clusterTime': {
+      clusterTime: new Timestamp({ t: 1790232488, i: 47 }),
+      signature: [Object]
+    },
+    operationTime: new Timestamp({ t: 1790232488, i: 47 })
+  },
+  ok: 0,
+  code: 112,
+  codeName: 'WriteConflict',
+  '$clusterTime': {
+    clusterTime: new Timestamp({ t: 1790232488, i: 47 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: 0
+    }
+  },
+  operationTime: new Timestamp({ t: 1790232488, i: 47 })
+}
+❌ Create GRN error: MongoServerError: Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction.
+    at Connection.sendCommand (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\cmap\connection.js:306:27)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Connection.command (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\cmap\connection.js:334:26)
+    at async Server.command (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sdam\server.js:194:29)
+    at async tryOperation (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\operations\execute_operation.js:213:32)
+    at async executeOperation (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\operations\execute_operation.js:78:16)
+    at async Collection.updateOne (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\collection.js:238:16) {
+  errorLabelSet: Set(1) { 'TransientTransactionError' },
+  errorResponse: {
+    errorLabels: [ 'TransientTransactionError' ],
+    ok: 0,
+    errmsg: 'Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction.',
+    code: 112,
+    codeName: 'WriteConflict',
+    '$clusterTime': {
+      clusterTime: new Timestamp({ t: 1790232488, i: 49 }),
+      signature: [Object]
+    },
+    operationTime: new Timestamp({ t: 1790232488, i: 49 })
+  },
+  ok: 0,
+  code: 112,
+  codeName: 'WriteConflict',
+  '$clusterTime': {
+    clusterTime: new Timestamp({ t: 1790232488, i: 49 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: 0
+    }
+  },
+  operationTime: new Timestamp({ t: 1790232488, i: 49 })
+}
+✔ concurrent retry of the same receipt adds stock only once (145.7326ms)
+✔ different products and duplicate product lines retain their own receipt quantities (322.1849ms)
+✔ foreign currency prices and charges remain stable through repeated edits (549.4848ms)
+❌ Update GRN error: Error: Cannot safely identify legacy batch LEGACY for Product 31. Reconcile its stock before changing this GRN.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at stockLot (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:83:29)
+    at applyReceiptStock (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:107:40)
+    at updateReceiptItems (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:40:5)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async exports.updateGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:841:31)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22 {
+  status: 400
+}
+✔ legacy ambiguous batch corrections fail safely without altering existing inventory (234.6794ms)
+✔ later vendor payments remain linked and balanced (269.1604ms)
+❌ Update GRN error: Error: Received quantity exceeds ordered quantity for Product 36.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at syncPurchaseQuantities (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:39:49)
+    at updateReceiptItems (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:47:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async exports.updateGRN (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:841:31)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3) {
+  status: 400
+}
+✔ GRN quantity controls purchase status and cannot exceed ordered quantity on edit (174.5089ms)
+✔ GST changes propagate to the invoice and journal without changing stock (261.4389ms)
+❌ Delete Invoice error: Error: Cancel the linked purchase returns before editing or reversing this receipt/invoice.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at preventReturnedReceiptChanges (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:9:85)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async reverseReceipt (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:54:3)
+    at async exports.deleteConsolidatedInvoice (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:1037:16)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3) {
+  status: 400
+}
+❌ Update consolidated invoice error: Error: Cancel linked purchase returns before editing this invoice.
+    at fail (C:\medyra(5.0)\medyra-backend_2Sept\utils\grnStock.js:5:41)
+    at exports.updateConsolidatedInvoice (C:\medyra(5.0)\medyra-backend_2Sept\controllers\goodsReceiptController.js:895:85)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:25:9
+    at async _wrapUserTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\lib\connection.js:756:9)
+    at async ClientSession.withTransaction (C:\medyra(5.0)\medyra-backend_2Sept\node_modules\mongoose\node_modules\mongodb\lib\sessions.js:503:30)
+    at async C:\medyra(5.0)\medyra-backend_2Sept\utils\receiptTransaction.js:10:22
+    at async call (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:25:3)
+    at async TestContext.<anonymous> (C:\medyra(5.0)\medyra-backend_2Sept\tests\grn-workflow.test.js:339:17)
+    at async Test.run (node:internal/test_runner/test:1389:7) {
+  status: 400
+}
+✔ purchase return reduces exact stock lot and dues, retries once, and cancellation restores both (317.9504ms)
+✔ paid purchase returns retain actual payment and create supplier credit; no fictitious payment journal (563.5104ms)
+✔ purchase returns reject over-return, duplicate lines, reserved stock, invalid IDs and changed retry payload (245.2712ms)
+✔ concurrent purchase returns cannot exceed the receipt or available stock (215.1178ms)
+✔ returning non-batch goods and later receiving or paying preserves return credit (467.9246ms)
+✔ same batch number on different receipts keeps purchase return lots separate (420.3105ms)
+✔ return rolls back earlier stock deductions when another line lacks shared non-batch stock (691.423ms)
+✔ full return reverses invoice rounding while retaining freight and handling (523.1181ms)
+✔ foreign-currency fractional returns preserve rates, GST split and stock precision (331.7359ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9857.1859

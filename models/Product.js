@@ -2,6 +2,9 @@ const mongoose = require("mongoose");
 
 // ========== BATCH SCHEMA ==========
 const BatchSchema = new mongoose.Schema({
+  sourceGRN: { type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' },
+  sourceGRNItem: { type: mongoose.Schema.Types.ObjectId },
+  purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder' },
   batchNumber: { type: String, required: true },
   mfgDate: { type: String, default: "" },
   expDate: { type: String, default: "" },
@@ -26,6 +29,10 @@ const BatchSchema = new mongoose.Schema({
 
 // ========== STOCK MOVEMENT HISTORY ==========
 const StockMovementSchema = new mongoose.Schema({
+  batchNumber: { type: String, default: '' },
+  sourceGRN: { type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' },
+  sourceGRNItem: { type: mongoose.Schema.Types.ObjectId },
+  purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder' },
   type: { type: String, enum: ["add", "remove", "reserve", "release"], required: true },
   quantity: { type: Number, required: true },
   mrp: { type: Number, default: 0 },

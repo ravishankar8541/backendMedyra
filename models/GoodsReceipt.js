@@ -3,6 +3,8 @@
 const mongoose = require('mongoose');
 
 const GRNItemSchema = new mongoose.Schema({
+  purchaseOrderItemId: { type: mongoose.Schema.Types.ObjectId },
+  stockBatchId: { type: mongoose.Schema.Types.ObjectId },
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
   productName: { type: String, required: true },
   sku: { type: String, default: '' },
@@ -18,6 +20,8 @@ const GRNItemSchema = new mongoose.Schema({
   mfgDate: { type: String, default: '' },
   expDate: { type: String, default: '' },
   unitPrice: { type: Number, default: 0 },
+  mrp: { type: Number },
+  sellingPrice: { type: Number },
   taxRate: { type: Number, default: 0 },
   subtotal: { type: Number, default: 0 },
   tax: { type: Number, default: 0 },
@@ -73,6 +77,10 @@ const ConsolidatedInvoiceSchema = new mongoose.Schema({
   exchangeRate: { type: Number, default: 1 },
   paidAmount: { type: Number, default: 0 },
   payments: { type: [PaymentSchema], default: [] },
+  returnCredit: { type: Number, default: 0 },
+  returnSubtotal: { type: Number, default: 0 },
+  returnTax: { type: Number, default: 0 },
+  supplierCredit: { type: Number, default: 0 },
   remainingAmount: { type: Number, default: 0 },
   paymentStatus: {
     type: String,
@@ -92,6 +100,7 @@ const ConsolidatedInvoiceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const GoodsReceiptSchema = new mongoose.Schema({
+  receiptRequestIds: { type: [String], default: [] },
   grnNumber: { type: String, required: true, unique: true },
   purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder', required: true },
   poNumber: { type: String, required: true },
@@ -129,7 +138,6 @@ const GoodsReceiptSchema = new mongoose.Schema({
   consolidatedInvoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' }
 }, { timestamps: true });
 
-ConsolidatedInvoiceSchema.index({ invoiceNumber: 1 });
 ConsolidatedInvoiceSchema.index({ poNumber: 1 });
 ConsolidatedInvoiceSchema.index({ supplierId: 1 });
 ConsolidatedInvoiceSchema.index({ invoiceDate: -1 });

@@ -2,6 +2,9 @@
 const mongoose = require('mongoose');
 
 const PurchaseReturnItemSchema = new mongoose.Schema({
+  invoiceItemId: mongoose.Schema.Types.ObjectId,
+  grnId: { type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' },
+  stockBatchId: mongoose.Schema.Types.ObjectId,
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
@@ -26,7 +29,7 @@ const PurchaseReturnItemSchema = new mongoose.Schema({
   quantity: {
     type: Number,
     required: true,
-    min: 1
+    min: 0
   },
   unit: {
     type: String,
@@ -57,6 +60,14 @@ const PurchaseReturnItemSchema = new mongoose.Schema({
 
 const PurchaseReturnSchema = new mongoose.Schema(
   {
+    invoice: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsolidatedInvoice' },
+    invoiceNumber: String,
+    requestId: { type: String },
+    requestHash: String,
+    roundOff: { type: Number, default: 0 },
+    cancelledAt: Date,
+    cancelledBy: String,
+    cancellationReason: String,
     returnNumber: {
       type: String,
       required: true,
@@ -158,5 +169,8 @@ const PurchaseReturnSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+PurchaseReturnSchema.index({ requestId: 1 }, { unique: true, sparse: true });
+PurchaseReturnSchema.index({ invoice: 1, status: 1 });
 
 module.exports = mongoose.models.PurchaseReturn || mongoose.model('PurchaseReturn', PurchaseReturnSchema);

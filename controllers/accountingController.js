@@ -416,6 +416,9 @@ const syncAllAutomatedJournals = async () => {
       const inventoryChargesAmt = Number(pi.inventoryCharges?.amount) || 0;
 
       // 2A. Purchase Bill Entry
+      if (grandTotal <= 0) {
+        await JournalEntry.deleteMany({ sourceModule: 'purchase_invoice', sourceId: piId });
+      }
       if (grandTotal > 0) {
         const lines = [];
 
@@ -560,7 +563,7 @@ const syncAllAutomatedJournals = async () => {
                            String(pi.status || '').toLowerCase() === 'paid';
 
       const recordedPaid = Number(pi.paidAmount) || 0;
-      const effectivePaidAmount = recordedPaid > 0 ? recordedPaid : (isMarkedPaid ? grandTotal : 0);
+      const effectivePaidAmount = recordedPaid > 0 ? recordedPaid : (isMarkedPaid && !pi.returnCredit ? grandTotal : 0);
 
       // Fallback: Agar payment status 'paid' hai ya paidAmount > 0 hai aur payments array khali hai
       if (piPayments.length === 0 && effectivePaidAmount > 0) {
@@ -863,6 +866,7 @@ exports.updateJournalEntry = async (req, res) => {
 
     const jv = await JournalEntry.findById(id);
     if (!jv) return res.status(404).json({ success: false, message: 'Journal voucher not found' });
+    if (jv.sourceModule === 'purchase_return') return res.status(400).json({ success: false, message: 'Cancel the purchase return to reverse this journal.' });
 
     if (!lines || lines.length < 2) {
       return res.status(400).json({ success: false, message: 'Journal entry requires at least 2 lines (debit & credit).' });
@@ -922,6 +926,8 @@ exports.updateJournalEntry = async (req, res) => {
 exports.deleteJournalEntry = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await JournalEntry.findById(id);
+    if (existing?.sourceModule === 'purchase_return') return res.status(400).json({ success: false, message: 'Cancel the purchase return to reverse this journal.' });
     const deleted = await JournalEntry.findByIdAndDelete(id);
     if (!deleted) {
       return res.status(404).json({ success: false, message: 'Journal voucher not found' });
@@ -1112,7 +1118,7 @@ exports.getProfitLoss = async (req, res) => {
 
     let procurementBills = 0;
     purchaseInvoices.forEach((pi) => {
-      procurementBills += Number(pi.subtotal) || 0;
+      procurementBills += (Number(pi.subtotal) || 0) - (Number(pi.returnSubtotal) || 0);
     });
 
     if (directMaterialsCOGS === 0 && procurementBills > 0) {
@@ -1204,11 +1210,12 @@ exports.getBalanceSheet = async (req, res) => {
     const cashAndBank = Math.max(0, (totalCashCollected - totalVendorPaid + journalBankAdjustments));
     const inventoryValuation = liveInventoryValue || 0;
 
-    const totalCurrentAssets = cashAndBank + accountsReceivable + inventoryValuation;
+    const supplierCredits = purchases.reduce((sum, pi) => sum + Number(pi.supplierCredit || 0), 0);
+    const totalCurrentAssets = cashAndBank + accountsReceivable + inventoryValuation + supplierCredits;
     const totalAssets = totalCurrentAssets + Math.max(0, fixedAssetsValuation);
 
     const totalOutputGst = invoices.reduce((sum, inv) => sum + (Number(inv.tax) || 0), 0);
-    const totalInputGst = purchases.reduce((sum, pi) => sum + (Number(pi.totalTax) || 0), 0);
+    const totalInputGst = purchases.reduce((sum, pi) => sum + (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0), 0);
     const outputGstPayable = Math.max(0, totalOutputGst - totalInputGst);
 
     const totalCurrentLiabilities = accountsPayable + outputGstPayable;
@@ -1227,6 +1234,7 @@ exports.getBalanceSheet = async (req, res) => {
             cashAndBank: Math.round(cashAndBank * 100) / 100,
             accountsReceivable: Math.round(accountsReceivable * 100) / 100,
             inventory: Math.round(inventoryValuation * 100) / 100,
+            supplierCredits: Math.round(supplierCredits * 100) / 100,
             totalCurrent: Math.round(totalCurrentAssets * 100) / 100
           },
           fixedAssets: {
@@ -1288,10 +1296,10 @@ exports.getAccountingDashboard = async (req, res) => {
     let totalInputTax = 0;
 
     purchases.forEach((pi) => {
-      totalProcurementSpend += Number(pi.grandTotal) || 0;
+      totalProcurementSpend += (Number(pi.grandTotal) || 0) - (Number(pi.returnCredit) || 0);
       totalPayables += Number(pi.remainingAmount) || 0;
       totalVendorPaid += Number(pi.paidAmount) || 0;
-      totalInputTax += Number(pi.totalTax) || 0;
+      totalInputTax += (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0);
     });
 
     const netCashFlow = totalCustomerPaid - totalVendorPaid;
@@ -1344,7 +1352,7 @@ exports.getTaxAndFinancialReports = async (req, res) => {
 
     let inputGst = 0;
     purchases.forEach((pi) => {
-      inputGst += Number(pi.totalTax) || 0;
+      inputGst += (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0);
     });
 
     const today = new Date();

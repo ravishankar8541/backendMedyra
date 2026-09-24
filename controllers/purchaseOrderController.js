@@ -123,10 +123,9 @@ exports.getPublicPOView = async (req, res) => {
           <td>
             <p style="font-weight:800;color:#000000;margin-bottom:2px;">${item.productName || item.name || 'Product'}</p>
             <p style="font-size:10px;color:#64748b;">HSN: ${item.hsn || '3004.90.99'}</p>
-            <p style="font-size:10px;color:#64748b;">Unit: ${item.unit || 'Strips'}</p>
           </td>
-          <td class="text-center" style="font-family:monospace;font-size:11px;">${item.batchNumber && item.batchNumber !== 'N/A' ? item.batchNumber : '-'}</td>
           <td class="text-center" style="font-weight:800;">${qty}</td>
+          <td class="text-center">${item.unit || 'Strips'}</td>
           <td class="text-right">${rate.toFixed(2)}</td>
           <td class="text-center">${tax}%</td>
           <td class="text-right" style="font-weight:900;color:#000000;">${lineTotal.toFixed(2)}</td>
@@ -143,8 +142,8 @@ exports.getPublicPOView = async (req, res) => {
             <p style="font-weight:800;color:#000000;">Freight / Shipping Charges</p>
             <p style="font-size:10px;color:#64748b;">Transportation & logistics</p>
           </td>
-          <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${freight.toFixed(2)}</td>
           <td class="text-center">${freightTaxRate}%</td>
           <td class="text-right" style="font-weight:900;">${freight.toFixed(2)}</td>
@@ -159,8 +158,8 @@ exports.getPublicPOView = async (req, res) => {
             <p style="font-weight:800;color:#000000;">Insurance Charges</p>
             <p style="font-size:10px;color:#64748b;">Cargo / transit insurance</p>
           </td>
-          <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${insurance.toFixed(2)}</td>
           <td class="text-center">${insuranceTaxRate}%</td>
           <td class="text-right" style="font-weight:900;">${insurance.toFixed(2)}</td>
@@ -175,8 +174,8 @@ exports.getPublicPOView = async (req, res) => {
             <p style="font-weight:800;color:#000000;">Inventory / Handling Charges</p>
             <p style="font-size:10px;color:#64748b;">Handling & inventory charges</p>
           </td>
-          <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${inventory.toFixed(2)}</td>
           <td class="text-center">${inventoryTaxRate}%</td>
           <td class="text-right" style="font-weight:900;">${inventory.toFixed(2)}</td>
@@ -263,8 +262,8 @@ exports.getPublicPOView = async (req, res) => {
         <tr>
           <th style="width:32px;" class="text-center">#</th>
           <th>Item & Description</th>
-          <th class="text-center" style="width:90px;">Batch</th>
-          <th class="text-center" style="width:60px;">Qty</th>
+          <th class="text-center" style="width:50px;">Qty</th>
+          <th class="text-center" style="width:55px;">Unit</th>
           <th class="text-right" style="width:80px;">Rate (${symbol})</th>
           <th class="text-center" style="width:60px;">Tax</th>
           <th class="text-right" style="width:90px;">Total (${symbol})</th>
@@ -464,6 +463,9 @@ exports.createPurchaseOrder = async (req, res) => {
 
     const purchaseOrder = new PurchaseOrder({
       ...req.body,
+      items: (req.body.items || []).map(({ batchNumber, receivedQty, remainingQty, _id, ...item }) => ({
+        ...item, receivedQty: 0, remainingQty: Number(item.quantity) || 0
+      })),
       poNumber,
       supplier: supplier || supplierName || 'N/A',
       supplierId: isValidObjectId(supplierId) ? supplierId : null,
@@ -491,17 +493,55 @@ exports.updatePurchaseOrder = async (req, res) => {
 
     const { supplier, supplierId, supplierName } = req.body;
 
+    const hasReceipts = order.items.some(item => Number(item.receivedQty) > 0);
+    if (hasReceipts && (
+      (supplierId && String(supplierId) !== String(order.supplierId)) ||
+      (req.body.currency && req.body.currency !== order.currency) ||
+      (req.body.exchangeRate !== undefined && Number(req.body.exchangeRate) !== Number(order.exchangeRate))
+    )) {
+      return res.status(400).json({ success: false, message: 'Supplier and currency cannot change after goods are received.' });
+    }
+    const items = req.body.items?.map(raw => {
+      const previous = order.items.find(item => String(item._id) === String(raw._id));
+      const { batchNumber, receivedQty, remainingQty, ...item } = raw;
+      const received = Number(previous?.receivedQty) || 0;
+      if (previous && received > 0 && String(previous.productId || previous.product) !== String(item.productId || item.product)) {
+        const error = new Error('A received product cannot be replaced.');
+        error.status = 400;
+        throw error;
+      }
+      if (!Number.isFinite(Number(item.quantity)) || Number(item.quantity) < received) {
+        const error = new Error('Ordered quantity cannot be less than received quantity.');
+        error.status = 400;
+        throw error;
+      }
+      return { ...item, ...(previous ? { _id: previous._id, batchNumber: previous.batchNumber } : {}), receivedQty: received, remainingQty: Number(item.quantity) - received };
+    });
+    if (items && order.items.some(old => Number(old.receivedQty) > 0 && !items.some(item => String(item._id) === String(old._id)))) {
+      return res.status(400).json({ success: false, message: 'A received purchase line cannot be removed. Correct its GRN first.' });
+    }
+    const receiptStatus = order.status;
     Object.assign(order, {
       ...req.body,
+      ...(items ? { items } : {}),
       supplier: supplier || supplierName || order.supplier,
       supplierId: isValidObjectId(supplierId) ? supplierId : order.supplierId
     });
+    if (hasReceipts) {
+      const ordered = order.items.reduce((sum, item) => sum + Number(item.quantity), 0);
+      const received = order.items.reduce((sum, item) => sum + Number(item.receivedQty), 0);
+      order.status = received >= ordered ? 'delivered' : 'partially_received';
+      order.partiallyReceived = received < ordered;
+      order.receivedPercentage = Math.round(received / ordered * 100);
+    } else {
+      order.status = receiptStatus;
+    }
 
     await order.save();
     res.json({ success: true, data: order, message: `Purchase Order #${order.poNumber} updated successfully` });
   } catch (error) {
     console.error('Update PO error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };
 
@@ -543,7 +583,15 @@ exports.getPurchaseOrder = async (req, res) => {
 
 exports.updatePurchaseOrderStatus = async (req, res) => {
   try {
-    const order = await PurchaseOrder.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
+    const order = await PurchaseOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Purchase Order not found' });
+    const hasReceipts = order.items.some(item => Number(item.receivedQty) > 0);
+    if ((hasReceipts && req.body.status !== order.status) ||
+        (!hasReceipts && ['delivered', 'partially_received'].includes(req.body.status))) {
+      return res.status(400).json({ success: false, message: 'Received purchase status is determined by GRNs. Update the receipt to change it.' });
+    }
+    order.status = req.body.status;
+    await order.save();
     res.json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -552,6 +600,10 @@ exports.updatePurchaseOrderStatus = async (req, res) => {
 
 exports.deletePurchaseOrder = async (req, res) => {
   try {
+    const { GoodsReceipt } = require('../models/GoodsReceipt');
+    if (await GoodsReceipt.exists({ purchaseOrder: req.params.id })) {
+      return res.status(400).json({ success: false, message: 'This purchase has linked GRNs and cannot be deleted.' });
+    }
     await PurchaseOrder.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: 'Deleted successfully' });
   } catch (error) {

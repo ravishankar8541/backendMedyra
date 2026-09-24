@@ -24,10 +24,9 @@ exports.getPriceLists = async (req, res) => {
       ];
     }
 
-    // ✅ batches populated so front-end has all available batches
     const lists = await VendorPriceList.find(query)
       .populate('supplierId', 'companyName email phone currency')
-      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory hsnCode')
+      .populate('items.productId', 'name sku unit productType pricing stock status category subCategory hsnCode')
       .sort({ updatedAt: -1 });
 
     res.json({ success: true, data: lists });
@@ -47,7 +46,7 @@ exports.getPriceListBySupplier = async (req, res) => {
 
     const list = await VendorPriceList.findOne({ supplierId, status: 'active' })
       .populate('supplierId', 'companyName email phone currency')
-      .populate('items.productId', 'name sku unit productType pricing stock status batches hsnCode category subCategory');
+      .populate('items.productId', 'name sku unit productType pricing stock status hsnCode category subCategory');
 
     if (!list) {
       return res.json({ success: true, data: null, message: 'No price list for this supplier' });
@@ -90,34 +89,6 @@ exports.upsertPriceList = async (req, res) => {
 
       const defaultQty = Math.max(1, parseInt(raw.defaultQty) || 1);
       const unit = (raw.unit || product.unit || 'Pcs').trim();
-      const batchNo = (raw.batchNumber || '').trim();
-      const isBatch = (product.productType || 'batch') !== 'non-batch';
-
-      // ✅ AUTO-REGISTER NEW BATCH IN PRODUCT INVENTORY
-      if (isBatch && batchNo && batchNo !== 'N/A') {
-        if (!Array.isArray(product.batches)) product.batches = [];
-        const batchExists = product.batches.some(
-          (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
-        );
-
-        if (!batchExists) {
-          product.batches.push({
-            batchNumber: batchNo,
-            quantity: 0,
-            costPrice: costPrice,
-            mrp: product.pricing?.mrp || 0,
-            sellingPrice: product.pricing?.sellingPrice || 0,
-            supplierName: supplier.companyName || '',
-            supplier: supplier._id,
-            addedDate: new Date().toISOString().split('T')[0],
-            addedBy: req.user?.name || 'Vendor Price List',
-            reason: `Registered via Vendor Price List (${supplier.companyName})`
-          });
-          product.markModified('batches');
-          await product.save();
-        }
-      }
-
       cleanItems.push({
         productId: product._id,
         productName: product.name || '',
@@ -126,8 +97,6 @@ exports.upsertPriceList = async (req, res) => {
         unit,
         costPrice,
         defaultQty,
-        batchNumber: batchNo,
-        isBatchProduct: isBatch,
         notes: (raw.notes || '').trim()
       });
     }
@@ -152,12 +121,12 @@ exports.upsertPriceList = async (req, res) => {
 
     const populated = await VendorPriceList.findById(list._id)
       .populate('supplierId', 'companyName email phone currency')
-      .populate('items.productId', 'name sku unit productType pricing stock status batches category subCategory');
+      .populate('items.productId', 'name sku unit productType pricing stock status category subCategory');
 
     res.json({
       success: true,
       data: populated,
-      message: `Price list saved (${cleanItems.length} products & batches updated)`
+      message: `Price list saved (${cleanItems.length} products)`
     });
   } catch (err) {
     console.error('upsertPriceList error:', err);
@@ -169,7 +138,7 @@ exports.upsertPriceList = async (req, res) => {
 exports.upsertItem = async (req, res) => {
   try {
     const { supplierId } = req.params;
-    const { productId, costPrice, defaultQty, unit, notes, batchNumber } = req.body;
+    const { productId, costPrice, defaultQty, unit, notes } = req.body;
 
     const rawPid = typeof productId === 'object' && productId !== null
       ? (productId._id || productId.id)
@@ -189,30 +158,6 @@ exports.upsertItem = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
 
-    const batchNo = (batchNumber || '').trim();
-    const isBatch = (product.productType || 'batch') !== 'non-batch';
-
-    // Register batch if new
-    if (isBatch && batchNo && batchNo !== 'N/A') {
-      if (!Array.isArray(product.batches)) product.batches = [];
-      const batchExists = product.batches.some(
-        (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
-      );
-
-      if (!batchExists) {
-        product.batches.push({
-          batchNumber: batchNo,
-          quantity: 0,
-          costPrice: price,
-          addedDate: new Date().toISOString().split('T')[0],
-          addedBy: req.user?.name || 'Vendor Price List',
-          reason: `Item batch registered via Price List`
-        });
-        product.markModified('batches');
-        await product.save();
-      }
-    }
-
     let list = await VendorPriceList.findOne({ supplierId });
     if (!list) {
       const supplier = await Supplier.findById(supplierId);
@@ -228,7 +173,7 @@ exports.upsertItem = async (req, res) => {
     }
 
     const idx = list.items.findIndex(
-      (i) => i.productId && i.productId.toString() === rawPid.toString() && (i.batchNumber || '') === batchNo
+      (i) => i.productId && i.productId.toString() === rawPid.toString()
     );
 
     const itemData = {
@@ -239,8 +184,6 @@ exports.upsertItem = async (req, res) => {
       unit: (unit || product.unit || 'Pcs').trim(),
       costPrice: price,
       defaultQty: Math.max(1, parseInt(defaultQty) || 1),
-      batchNumber: batchNo,
-      isBatchProduct: isBatch,
       notes: (notes || '').trim()
     };
 

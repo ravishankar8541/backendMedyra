@@ -58,7 +58,7 @@ const JournalEntrySchema = new mongoose.Schema({
   },
   sourceModule: {
     type: String,
-    enum: ['manual', 'sales_invoice', 'purchase_invoice', 'payment_receipt', 'payment_disbursement', 'inventory_adjustment'],
+    enum: ['manual', 'sales_invoice', 'purchase_invoice', 'purchase_return', 'payment_receipt', 'payment_disbursement', 'inventory_adjustment'],
     default: 'manual'
   },
   sourceId: {

@@ -3,9 +3,75 @@ const mongoose = require('mongoose');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
+const PurchaseReturn = require('../models/PurchaseReturn');
+const { settleInvoice } = require('../utils/purchaseSettlement');
+const preventReturnedReceiptChanges = async grn => {
+  if (await PurchaseReturn.exists({ 'items.grnId': grn._id, status: 'completed' })) fail('Cancel the linked purchase returns before editing or reversing this receipt/invoice.');
+};
 const JournalEntry = require('../models/JournalEntry');
 const nodemailer = require('nodemailer');
+const receiptTransaction = require('../utils/receiptTransaction');
+const { idOf, fail, plain, quantityOf, purchaseLine, syncPurchaseQuantities, validateItem, applyReceiptStock, recalculateReceipt } = require('../utils/grnStock');
 const { syncAllAutomatedJournals } = require('./accountingController'); // ⭐ Instant Sync
+
+// Apply absolute receipt quantities; repeated PUTs never add stock again.
+const updateReceiptItems = async (grn, updates, actor) => {
+  await preventReturnedReceiptChanges(grn);
+  if (grn.status !== 'completed') fail('Only completed receipts can be edited.');
+  const seen = new Set();
+  for (const upd of updates) {
+    const item = grn.items.find(item => idOf(item._id) === idOf(upd._id));
+    if (!item || seen.has(idOf(upd._id))) fail('Unknown or duplicate GRN item. Reload the receipt.');
+    seen.add(idOf(upd._id));
+    const before = plain(item);
+    const product = await Product.findById(item.productId);
+    if (!product) fail(`Product not found for ${item.productName}.`);
+    const next = { ...before };
+    for (const field of ['batchNumber', 'mfgDate', 'expDate', 'mrp', 'sellingPrice', 'unitPrice', 'taxRate', 'remarks', 'unit', 'hsn']) {
+      if (upd[field] !== undefined) next[field] = upd[field];
+    }
+    if (upd.receivedQty !== undefined) next.receivedQty = Number(upd.receivedQty);
+    next.acceptedQty = next.receivedQty;
+    if (upd.unit !== undefined && !String(upd.unit).trim()) fail('Unit is required.');
+    for (const field of ['mfgDate', 'expDate']) {
+      if (next[field] && !Number.isFinite(Date.parse(next[field]))) fail('Enter a valid manufacturing or expiry date.');
+    }
+    if (next.mfgDate && next.expDate && Date.parse(next.expDate) < Date.parse(next.mfgDate)) fail('Expiry date cannot be before manufacturing date.');
+    applyReceiptStock(product, before, next, grn, actor);
+    Object.assign(item, next);
+    await product.save();
+  }
+  const po = await PurchaseOrder.findById(grn.purchaseOrder);
+  if (!po) fail('The linked purchase order is missing.');
+  const receipts = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
+  syncPurchaseQuantities(po, receipts.map(receipt => idOf(receipt._id) === idOf(grn._id) ? grn : receipt));
+  await po.save();
+  recalculateReceipt(grn);
+  grn.markModified('items');
+};
+
+const reverseReceipt = async (grn, actor) => {
+  await preventReturnedReceiptChanges(grn);
+  if (grn.status !== 'completed') return; // Already reversed: never subtract twice.
+  for (const item of grn.items) {
+    if (quantityOf(item) <= 0) continue;
+    const product = await Product.findById(item.productId);
+    if (!product) fail(`Cannot reverse missing product ${item.productName}.`);
+    applyReceiptStock(product, plain(item), null, grn, actor);
+    await product.save();
+  }
+  grn.status = 'cancelled';
+  grn.invoiceGenerated = false;
+  grn.invoiceId = null;
+  grn.consolidatedInvoiceId = null;
+  await grn.save();
+  const po = await PurchaseOrder.findById(grn.purchaseOrder);
+  if (po) {
+    const remaining = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
+    syncPurchaseQuantities(po, remaining);
+    await po.save();
+  }
+};
 
 // ============================================
 // PUBLIC INVOICE VIEW (NO AUTH REQUIRED)
@@ -73,12 +139,12 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td>
             <p style="font-weight:800;color:#000;margin-bottom:2px;">${item.productName || item.name || 'Product'}</p>
             <p style="font-size:10px;color:#64748b;">HSN: ${item.hsn || '3004.90.99'}</p>
-            <p style="font-size:10px;color:#64748b;">Unit: ${item.unit || 'Strips'}</p>
           </td>
           <td class="text-center" style="font-family:monospace;font-size:11px;">${
             item.batchNumber && item.batchNumber !== 'N/A' ? item.batchNumber : '-'
           }</td>
           <td class="text-center" style="font-weight:800;">${qty}</td>
+          <td class="text-center">${item.unit || 'Strips'}</td>
           <td class="text-right">${rate.toFixed(2)}</td>
           <td class="text-center">${tax}%</td>
           <td class="text-right" style="font-weight:900;color:#000;">${lineTotal.toFixed(2)}</td>
@@ -100,7 +166,7 @@ exports.getPublicInvoiceView = async (req, res) => {
       invoice.grandTotal || itemsSubtotal + freight + insurance + inventory + totalTax
     );
     const paidAmt = Number(invoice.paidAmount || 0);
-    const balanceAmt = Math.max(0, grandTotal - paidAmt);
+    const balanceAmt = Math.max(0, grandTotal - Number(invoice.returnCredit || 0) - paidAmt);
     const taxTypeLabel =
       invoice.gstType === 'cgst_sgst' ? 'CGST + SGST' : 'IGST';
 
@@ -113,6 +179,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td><p style="font-weight:800;">Freight / Shipping Charges</p></td>
           <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${freight.toFixed(2)}</td>
           <td class="text-center">${Number(invoice.freight?.taxRate || 18)}%</td>
           <td class="text-right" style="font-weight:900;">${freight.toFixed(2)}</td>
@@ -126,6 +193,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td><p style="font-weight:800;">Insurance Charges</p></td>
           <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${insurance.toFixed(2)}</td>
           <td class="text-center">${Number(invoice.insurance?.taxRate || 18)}%</td>
           <td class="text-right" style="font-weight:900;">${insurance.toFixed(2)}</td>
@@ -139,6 +207,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td><p style="font-weight:800;">Inventory / Handling Charges</p></td>
           <td class="text-center">-</td>
           <td class="text-center" style="font-weight:800;">1</td>
+          <td class="text-center">—</td>
           <td class="text-right">${inventory.toFixed(2)}</td>
           <td class="text-center">${Number(invoice.inventoryCharges?.taxRate || 18)}%</td>
           <td class="text-right" style="font-weight:900;">${inventory.toFixed(2)}</td>
@@ -227,7 +296,8 @@ exports.getPublicInvoiceView = async (req, res) => {
           <th style="width:32px;" class="text-center">#</th>
           <th>Item & Description</th>
           <th class="text-center" style="width:90px;">Batch</th>
-          <th class="text-center" style="width:60px;">Qty</th>
+          <th class="text-center" style="width:50px;">Qty</th>
+          <th class="text-center" style="width:55px;">Unit</th>
           <th class="text-right" style="width:80px;">Rate (${symbol})</th>
           <th class="text-center" style="width:60px;">Tax</th>
           <th class="text-right" style="width:90px;">Total (${symbol})</th>
@@ -264,8 +334,10 @@ exports.getPublicInvoiceView = async (req, res) => {
           <span style="color:#059669;font-weight:700;">Paid</span>
           <span style="font-weight:800;color:#059669;">${symbol}${paidAmt.toFixed(2)}</span>
         </div>
+        <div class="total-row"><span>Return Credit</span><span>${symbol}${Number(invoice.returnCredit || 0).toFixed(2)}</span></div>
+        <div class="total-row"><span>Supplier Credit</span><span>${symbol}${Number(invoice.supplierCredit || 0).toFixed(2)}</span></div>
         <div class="total-row" style="padding:6px 8px;border-bottom:none;background:#f1f5f9;border-radius:4px;">
-          <span style="color:${balanceAmt > 0 ? '#dc2626' : '#059669'};font-weight:700;">Balance</span>
+          <span style="color:${balanceAmt > 0 ? '#dc2626' : '#059669'};font-weight:700;">Dues</span>
           <span style="font-weight:900;color:${balanceAmt > 0 ? '#dc2626' : '#059669'};">${symbol}${balanceAmt.toFixed(2)}</span>
         </div>
       </div>
@@ -352,7 +424,7 @@ exports.createGRN = async (req, res) => {
       initialPayment
     } = req.body;
 
-    if (!purchaseOrderId || !items || items.length === 0) {
+    if (!purchaseOrderId || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Purchase Order and at least one item are required'
@@ -389,7 +461,26 @@ exports.createGRN = async (req, res) => {
     const poCurrency = currency || po.currency || 'INR';
     const effExchangeRate = Number(exchangeRate || po.exchangeRate || 1) || 1;
 
-    let existingGRN = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId });
+    if (po.status === 'cancelled') fail('Cannot receive a cancelled purchase order.');
+    const requestId = String(req.body.receiptRequestId || '').trim();
+    if (requestId) {
+      const previous = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId, receiptRequestIds: requestId });
+      if (previous) {
+        if (previous.status !== 'completed') fail('This receipt was reversed. Start a new receipt.');
+        return res.status(200).json({ success: true, data: previous, message: 'Receipt already saved.' });
+      }
+    }
+    let existingGRN = await GoodsReceipt.findOne({ purchaseOrder: purchaseOrderId, status: 'completed' });
+    const receiptContext = existingGRN ? {
+      ...plain(existingGRN), receivedDate: receivedDate || existingGRN.receivedDate
+    } : {
+      _id: new mongoose.Types.ObjectId(), grnNumber: await generateGRNNumber(),
+      purchaseOrder: po._id, poNumber: po.poNumber,
+      supplierName: finalSupplierName, supplierId: possibleSupId,
+      receivedDate: receivedDate || new Date().toISOString().split('T')[0],
+      currency: poCurrency, exchangeRate: effExchangeRate
+    };
+    const lineReceived = new Map();
     const isFirstReceipt = !existingGRN;
 
     let subtotal = 0;
@@ -397,7 +488,8 @@ exports.createGRN = async (req, res) => {
     const processedItems = [];
 
     for (const item of items) {
-      const receivedQty = Number(item.receivedQty) || Number(item.acceptedQty) || 0;
+      const receivedQty = quantityOf(item);
+      if (!Number.isFinite(receivedQty) || receivedQty < 0) fail('Invalid received quantity.');
       if (receivedQty <= 0) continue;
 
       let product = null;
@@ -422,94 +514,35 @@ exports.createGRN = async (req, res) => {
         product = await Product.findOne({ $or: [{ name: item.productName }, { 'basicInfo.name': item.productName }] });
       }
 
-      const rate = Number(item.unitPrice) || 0;
-      const taxRate = Number(item.taxRate) || 0;
+      if (!product) fail(`Product not found: ${item.productName || item.productId}`);
+      const line = purchaseLine(po, { ...item, productId: product._id });
+      const key = idOf(line._id);
+      const already = Number(line.receivedQty || 0);
+      if (item.alreadyReceived !== undefined && Number(item.alreadyReceived) !== already) {
+        fail('This purchase has been received since you opened it. Select the purchase again.');
+      }
+      const receivedNow = (lineReceived.get(key) || 0) + receivedQty;
+      if (already + receivedNow > Number(line.quantity)) fail(`Received quantity exceeds pending quantity for ${product.name}.`);
+      lineReceived.set(key, receivedNow);
+      validateItem(item, product);
+      const rate = Number(item.unitPrice ?? line.unitPrice) || 0;
+      const taxRate = Number(item.taxRate ?? line.taxRate) || 0;
       const itemSubtotal = receivedQty * rate;
-      const itemTax = itemSubtotal * (taxRate / 100);
-
+      const itemTax = itemSubtotal * taxRate / 100;
       subtotal += itemSubtotal;
       itemsTax += itemTax;
-
       const userMfgDate = item.mfgDate || '';
       const userExpDate = item.expDate || '';
+      const rawMrp = Number(item.mrp) || 0;
+      const rawSellingPrice = Number(item.sellingPrice) || 0;
 
-      const costInINR = rate > 0
-        ? (poCurrency !== 'INR' && effExchangeRate > 0 ? Number((rate * effExchangeRate).toFixed(2)) : rate)
-        : (product?.pricing?.costPrice || 0);
-
-      const rawMrp = (item.mrp !== undefined && item.mrp !== null && item.mrp !== '' && !isNaN(Number(item.mrp)))
-        ? Number(item.mrp)
-        : 0;
-      const rawSellingPrice = (item.sellingPrice !== undefined && item.sellingPrice !== null && item.sellingPrice !== '' && !isNaN(Number(item.sellingPrice)))
-        ? Number(item.sellingPrice)
-        : 0;
-
-      let finalMrpInINR = rawMrp > 0
-        ? (poCurrency !== 'INR' && effExchangeRate > 0 ? Number((rawMrp * effExchangeRate).toFixed(2)) : rawMrp)
-        : (product?.pricing?.mrp || 0);
-
-      let finalSellingPriceInINR = rawSellingPrice > 0
-        ? (poCurrency !== 'INR' && effExchangeRate > 0 ? Number((rawSellingPrice * effExchangeRate).toFixed(2)) : rawSellingPrice)
-        : (product?.pricing?.sellingPrice || (costInINR > 0 ? Number((costInINR * 1.2).toFixed(2)) : 0));
-
-      if (product) {
-        const productType = product.productType || product.basicInfo?.productType || 'batch';
-        const isBatchProduct = productType !== 'non-batch';
-
-        if (isBatchProduct) {
-          if (!Array.isArray(product.batches)) product.batches = [];
-          const batchNumber = (item.batchNumber && item.batchNumber !== 'N/A')
-            ? item.batchNumber.trim()
-            : `BATCH-${Date.now().toString().slice(-6)}`;
-
-          product.batches.push({
-            batchNumber,
-            mfgDate: userMfgDate,
-            expDate: userExpDate,
-            quantity: receivedQty,
-            costPrice: costInINR,
-            sellingPrice: finalSellingPriceInINR,
-            mrp: finalMrpInINR,
-            supplierName: finalSupplierName,
-            supplier: possibleSupId,
-            manufacturer: product.manufacturer || product.basicInfo?.manufacturer || 'N/A',
-            addedDate: receivedDate || new Date().toISOString().split('T')[0],
-            addedBy: req.user?.name || receivedBy || 'System',
-            reason: poCurrency !== 'INR'
-              ? `GRN ${existingGRN?.grnNumber || po.poNumber} (${rate} ${poCurrency} @ Exch ${effExchangeRate} = ₹${costInINR.toFixed(2)})`
-              : `GRN ${existingGRN?.grnNumber || po.poNumber} @ ₹${costInINR.toFixed(2)}`
-          });
-          product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
-          product.markModified('batches');
-        } else {
-          product.stock = (Number(product.stock) || 0) + receivedQty;
-          if (!Array.isArray(product.stockMovements)) product.stockMovements = [];
-          product.stockMovements.push({
-            date: new Date(),
-            type: 'add',
-            quantity: receivedQty,
-            mrp: finalMrpInINR,
-            costPrice: costInINR,
-            sellingPrice: finalSellingPriceInINR,
-            supplierName: finalSupplierName,
-            reason: `Received via GRN (${po.poNumber || 'GRN'})`
-          });
-          product.markModified('stockMovements');
-        }
-
-        const minStock = product.minStock || product.basicInfo?.minStock || 0;
-        if (product.stock <= 0) product.status = 'inactive';
-        else if (product.stock <= minStock) product.status = 'low_stock';
-        else product.status = 'active';
-
-        await product.save();
-      }
-
-      const orderedQty = Number(item.orderedQty) || 0;
-      const alreadyReceived = Number(item.alreadyReceived) || 0;
+      const orderedQty = Number(line.quantity);
+      const alreadyReceived = already;
       const remainingQty = Math.max(0, orderedQty - alreadyReceived - receivedQty);
 
-      processedItems.push({
+      const processedItem = {
+        _id: new mongoose.Types.ObjectId(),
+        purchaseOrderItemId: line._id,
         productId: product?._id || (mongoose.isValidObjectId(item.productId) ? item.productId : null),
         productName: item.productName || product?.name || '',
         sku: item.sku || product?.sku || '',
@@ -525,14 +558,17 @@ exports.createGRN = async (req, res) => {
         mfgDate: userMfgDate,
         expDate: userExpDate,
         unitPrice: rate,
-        mrp: rawMrp,
-        sellingPrice: rawSellingPrice,
+        mrp: rawMrp > 0 ? rawMrp : Number(product.pricing?.mrp || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1),
+        sellingPrice: rawSellingPrice > 0 ? rawSellingPrice : (Number(product.pricing?.sellingPrice || 0) / (poCurrency !== 'INR' ? effExchangeRate : 1) || Number((rate * 1.2).toFixed(2))),
         taxRate,
         subtotal: itemSubtotal,
         tax: itemTax,
         totalWithTax: itemSubtotal + itemTax,
         remarks: item.remarks || ''
-      });
+      };
+      applyReceiptStock(product, null, processedItem, receiptContext, req.user?.name || receivedBy || 'System');
+      await product.save();
+      processedItems.push(processedItem);
     }
 
     if (processedItems.length === 0) {
@@ -557,7 +593,7 @@ exports.createGRN = async (req, res) => {
     let overpaymentCredit = 0;
 
     if (isFirstReceipt) {
-      const grnNumber = await generateGRNNumber();
+      const grnNumber = receiptContext.grnNumber;
 
       const freightData = {
         amount: Number(freight?.amount) || 0,
@@ -585,6 +621,7 @@ exports.createGRN = async (req, res) => {
       const roundOff = isInternational ? 0 : Number((grandTotal - exactTotal).toFixed(2));
 
       grn = new GoodsReceipt({
+        _id: receiptContext._id,
         grnNumber,
         purchaseOrder: purchaseOrderId,
         poNumber: poNumber || po.poNumber,
@@ -624,30 +661,8 @@ exports.createGRN = async (req, res) => {
       grn = existingGRN;
       const mergedItems = [...(grn.items || [])];
 
-      processedItems.forEach(newItem => {
-        const existingIdx = mergedItems.findIndex(
-          item =>
-            (item.productId && newItem.productId && item.productId.toString() === newItem.productId.toString()) ||
-            (item.productName && item.productName === newItem.productName)
-        );
-
-        if (existingIdx > -1) {
-          const ex = mergedItems[existingIdx];
-          ex.receivedQty = (ex.receivedQty || 0) + (newItem.receivedQty || 0);
-          ex.acceptedQty = (ex.acceptedQty || 0) + (newItem.receivedQty || 0);
-          ex.remainingQty = Math.max(0, (ex.orderedQty || 0) - (ex.receivedQty || 0));
-          ex.subtotal = (ex.receivedQty || 0) * (ex.unitPrice || 0);
-          ex.tax = (ex.subtotal || 0) * ((ex.taxRate || 0) / 100);
-          ex.totalWithTax = (ex.subtotal || 0) + (ex.tax || 0);
-          if (newItem.batchNumber && newItem.batchNumber !== 'N/A') ex.batchNumber = newItem.batchNumber;
-          if (newItem.mfgDate) ex.mfgDate = newItem.mfgDate;
-          if (newItem.expDate) ex.expDate = newItem.expDate;
-          if (newItem.mrp) ex.mrp = newItem.mrp;
-          if (newItem.sellingPrice) ex.sellingPrice = newItem.sellingPrice;
-        } else {
-          mergedItems.push(newItem);
-        }
-      });
+      // Each delivery retains its batch, rate and stock-lot identity.
+      mergedItems.push(...processedItems);
 
       let newSubtotal = 0;
       let newItemsTax = 0;
@@ -681,35 +696,14 @@ exports.createGRN = async (req, res) => {
       grn.notes = notes ? `${grn.notes ? grn.notes + ' | ' : ''}${notes}` : grn.notes;
     }
 
+    if (requestId) grn.receiptRequestIds.push(requestId);
     await grn.save();
 
-    // PO Status sync
-    const totalOrdered = po.items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
-    let totalReceived = 0;
-
-    po.items.forEach((poItem) => {
-      const receivedItem = processedItems.find(
-        (i) =>
-          (i.productId && poItem.productId && i.productId.toString() === poItem.productId.toString()) ||
-          (i.productId && poItem.product && i.productId.toString() === poItem.product.toString()) ||
-          (i.productName && (i.productName === poItem.productName || i.productName === poItem.name))
-      );
-
-      if (receivedItem) {
-        poItem.receivedQty = (Number(poItem.receivedQty) || 0) + Number(receivedItem.receivedQty);
-        poItem.remainingQty = Math.max(0, (Number(poItem.quantity) || 0) - Number(poItem.receivedQty));
-      }
-      totalReceived += Number(poItem.receivedQty || 0);
-    });
-
-    po.receivedPercentage = totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0;
-    po.partiallyReceived = totalReceived > 0 && totalReceived < totalOrdered;
-    if (totalReceived >= totalOrdered) {
-      po.status = 'delivered';
-      po.deliveryDate = receivedDate || new Date().toISOString().split('T')[0];
-    } else if (totalReceived > 0) {
-      po.status = 'partially_received';
-    }
+    const allReceipts = await GoodsReceipt.find({ purchaseOrder: po._id, status: 'completed' });
+    syncPurchaseQuantities(po, allReceipts);
+    if (po.status === 'delivered') po.deliveryDate = receivedDate || new Date().toISOString().split('T')[0];
+    const currentReceipt = allReceipts.find(receipt => idOf(receipt._id) === idOf(grn._id));
+    if (currentReceipt) grn.items = currentReceipt.items;
 
     if (overpaymentCredit > 0) {
       po.creditAmount = (Number(po.creditAmount) || 0) + overpaymentCredit;
@@ -718,8 +712,7 @@ exports.createGRN = async (req, res) => {
 
     // Consolidated Purchase Invoice (PI)
     let existingInvoice = await ConsolidatedInvoice.findOne({
-      purchaseOrder: purchaseOrderId,
-      status: { $in: ['draft', 'generated'] }
+      purchaseOrder: purchaseOrderId
     });
 
     if (!existingInvoice) {
@@ -759,6 +752,7 @@ exports.createGRN = async (req, res) => {
         createdBy: req.user?.id || req.user?._id,
         receiptCount: 1
       });
+      settleInvoice(existingInvoice);
       await existingInvoice.save();
     } else {
       existingInvoice.items = grn.items;
@@ -777,6 +771,7 @@ exports.createGRN = async (req, res) => {
       existingInvoice.status = (grn.paidAmount || 0) >= grn.grandTotal ? 'paid' : 'generated';
       existingInvoice.payments = grn.payments || [];
       existingInvoice.receiptCount = (existingInvoice.receiptCount || 0) + 1;
+      settleInvoice(existingInvoice);
       await existingInvoice.save();
     }
 
@@ -784,15 +779,6 @@ exports.createGRN = async (req, res) => {
     grn.invoiceGenerated = true;
     grn.invoiceId = existingInvoice._id;
     await grn.save();
-
-    // Trigger auto journal sync
-    try {
-      if (syncAllAutomatedJournals) {
-        await syncAllAutomatedJournals();
-      }
-    } catch (e) {
-      console.warn('Auto journal sync trigger error:', e.message);
-    }
 
     res.status(201).json({
       success: true,
@@ -802,7 +788,7 @@ exports.createGRN = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Create GRN error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    throw error;
   }
 };
 
@@ -815,6 +801,8 @@ exports.updateGRN = async (req, res) => {
     if (!grn) {
       return res.status(404).json({ success: false, message: 'GRN not found' });
     }
+
+    await preventReturnedReceiptChanges(grn);
 
     const {
       items,
@@ -850,130 +838,9 @@ exports.updateGRN = async (req, res) => {
       grn.inventoryCharges = { amount: amt, taxRate: rate, taxAmount: (amt * rate) / 100 };
     }
 
-    if (Array.isArray(items)) {
-      let newSubtotal = 0;
-      let newItemsTax = 0;
-
-      for (const upd of items) {
-        const grnItem = grn.items.id(upd._id) || grn.items.find(i => String(i._id) === String(upd._id));
-        if (!grnItem) continue;
-
-        const oldQty = Number(grnItem.receivedQty) || Number(grnItem.acceptedQty) || 0;
-        const newQty = upd.receivedQty !== undefined ? Number(upd.receivedQty) || 0 : oldQty;
-        const qtyDelta = newQty - oldQty;
-        const oldBatchNumber = grnItem.batchNumber;
-
-        if (qtyDelta !== 0 && grnItem.productId) {
-          const product = await Product.findById(grnItem.productId);
-          if (product) {
-            const isBatch = (product.productType || 'batch') !== 'non-batch';
-            if (isBatch && Array.isArray(product.batches)) {
-              let batch = product.batches.find(b => b.batchNumber === oldBatchNumber) ||
-                          (upd.batchNumber ? product.batches.find(b => b.batchNumber === upd.batchNumber) : null);
-
-              if (batch) {
-                batch.quantity = Math.max(0, (Number(batch.quantity) || 0) + qtyDelta);
-                if (upd.mfgDate !== undefined) batch.mfgDate = upd.mfgDate;
-                if (upd.expDate !== undefined) batch.expDate = upd.expDate;
-                if (upd.mrp !== undefined && upd.mrp !== '') batch.mrp = Number(upd.mrp) || batch.mrp;
-                if (upd.sellingPrice !== undefined && upd.sellingPrice !== '') batch.sellingPrice = Number(upd.sellingPrice) || batch.sellingPrice;
-                if (upd.batchNumber) batch.batchNumber = upd.batchNumber;
-                if (batch.quantity === 0) product.batches = product.batches.filter(b => b !== batch);
-              } else if (qtyDelta > 0 && upd.batchNumber) {
-                product.batches.push({
-                  batchNumber: upd.batchNumber,
-                  quantity: qtyDelta,
-                  mfgDate: upd.mfgDate || '',
-                  expDate: upd.expDate || '',
-                  mrp: Number(upd.mrp) || 0,
-                  sellingPrice: Number(upd.sellingPrice) || 0
-                });
-              }
-              product.stock = product.batches.reduce((s, b) => s + (Number(b.quantity) || 0), 0);
-              product.markModified('batches');
-              await product.save();
-            } else {
-              product.stock = Math.max(0, (Number(product.stock) || 0) + qtyDelta);
-              await product.save();
-            }
-          }
-        }
-
-        if (upd.receivedQty !== undefined) {
-          grnItem.receivedQty = newQty;
-          grnItem.acceptedQty = newQty;
-          if (grnItem.orderedQty) grnItem.remainingQty = Math.max(0, grnItem.orderedQty - newQty);
-        }
-        if (upd.unitPrice !== undefined) grnItem.unitPrice = Number(upd.unitPrice) || 0;
-        if (upd.taxRate !== undefined) grnItem.taxRate = Number(upd.taxRate) || 0;
-        if (upd.batchNumber) grnItem.batchNumber = upd.batchNumber;
-        if (upd.mfgDate !== undefined) grnItem.mfgDate = upd.mfgDate;
-        if (upd.expDate !== undefined) grnItem.expDate = upd.expDate;
-        if (upd.mrp !== undefined && upd.mrp !== '') grnItem.mrp = Number(upd.mrp) || 0;
-        if (upd.sellingPrice !== undefined && upd.sellingPrice !== '') grnItem.sellingPrice = Number(upd.sellingPrice) || 0;
-
-        const lineTotal = (Number(grnItem.receivedQty) || 0) * (Number(grnItem.unitPrice) || 0);
-        const lineTax = (lineTotal * (Number(grnItem.taxRate) || 0)) / 100;
-        grnItem.subtotal = lineTotal;
-        grnItem.tax = lineTax;
-        grnItem.totalWithTax = lineTotal + lineTax;
-
-        newSubtotal += lineTotal;
-        newItemsTax += lineTax;
-      }
-
-      grn.markModified('items');
-      grn.subtotal = newSubtotal;
-      grn.totalTax = newItemsTax;
-    }
-
-    const cSub =
-      (Number(grn.freight?.amount) || 0) +
-      (Number(grn.insurance?.amount) || 0) +
-      (Number(grn.inventoryCharges?.amount) || 0);
-    const cTax =
-      (Number(grn.freight?.taxAmount) || 0) +
-      (Number(grn.insurance?.taxAmount) || 0) +
-      (Number(grn.inventoryCharges?.taxAmount) || 0);
-
-    grn.chargesSubtotal = cSub;
-    grn.chargesTax = cTax;
-
-    const totalTaxCombined = (Number(grn.totalTax) || 0) + cTax;
-    grn.totalTax = totalTaxCombined;
-
-    const exactTotal = (Number(grn.subtotal) || 0) + cSub + totalTaxCombined;
-    const isInternational = grn.currency && grn.currency !== 'INR';
-    grn.grandTotal = isInternational ? Number(exactTotal.toFixed(2)) : Math.round(exactTotal);
-    grn.roundOff = isInternational ? 0 : Number((grn.grandTotal - exactTotal).toFixed(2));
-
+    if (Array.isArray(items)) await updateReceiptItems(grn, items, req.user?.name || 'System');
+    recalculateReceipt(grn);
     await grn.save();
-
-    if (grn.purchaseOrder) {
-      const po = await PurchaseOrder.findById(grn.purchaseOrder);
-      if (po) {
-        let totalOrdered = 0;
-        let totalReceived = 0;
-        po.items.forEach((poItem) => {
-          totalOrdered += Number(poItem.quantity) || 0;
-          const matched = grn.items.find(gi => String(gi.productId) === String(poItem.productId || poItem.product));
-          if (matched) {
-            poItem.receivedQty = Number(matched.receivedQty) || 0;
-            poItem.remainingQty = Math.max(0, (Number(poItem.quantity) || 0) - (Number(matched.receivedQty) || 0));
-          }
-          totalReceived += Number(poItem.receivedQty) || 0;
-        });
-        po.receivedPercentage = totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0;
-        po.partiallyReceived = totalReceived > 0 && totalReceived < totalOrdered;
-        if (totalReceived >= totalOrdered) {
-          po.status = 'delivered';
-        } else if (totalReceived > 0) {
-          po.status = 'partially_received';
-        }
-        po.markModified('items');
-        await po.save();
-      }
-    }
 
     let inv = null;
     if (grn.consolidatedInvoiceId) {
@@ -996,18 +863,12 @@ exports.updateGRN = async (req, res) => {
       inv.insurance = grn.insurance;
       inv.inventoryCharges = grn.inventoryCharges;
       inv.items = grn.items;
+      inv.gstType = grn.gstType;
       inv.remainingAmount = Math.max(0, inv.grandTotal - (Number(inv.paidAmount) || 0));
       inv.paymentStatus = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : (inv.paidAmount > 0 ? 'partial' : 'pending');
       inv.status = (inv.paidAmount || 0) >= inv.grandTotal ? 'paid' : 'generated';
+      settleInvoice(inv);
       await inv.save();
-    }
-
-    try {
-      if (syncAllAutomatedJournals) {
-        await syncAllAutomatedJournals();
-      }
-    } catch (e) {
-      console.warn('Sync error on updateGRN:', e.message);
     }
 
     res.json({
@@ -1017,7 +878,7 @@ exports.updateGRN = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Update GRN error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    throw error;
   }
 };
 
@@ -1030,6 +891,8 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
     }
+
+    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before editing this invoice.');
 
     const {
       dueDate,
@@ -1046,6 +909,10 @@ exports.updateConsolidatedInvoice = async (req, res) => {
       gstType
     } = req.body;
 
+    for (const charge of [freight, insurance, inventoryCharges]) {
+      if (charge && (!Number.isFinite(Number(charge.amount)) || Number(charge.amount) < 0 || !Number.isFinite(Number(charge.taxRate)) || Number(charge.taxRate) < 0 || Number(charge.taxRate) > 100)) fail('Charges must be non-negative and GST must be between 0 and 100%.');
+    }
+    if (gstType !== undefined && !['igst', 'cgst_sgst'].includes(gstType)) fail('Invalid GST type.');
     if (dueDate !== undefined) invoice.dueDate = dueDate;
     if (notes !== undefined) invoice.notes = notes;
     if (invoiceDate !== undefined) invoice.invoiceDate = invoiceDate;
@@ -1056,44 +923,15 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     if (gstType !== undefined) invoice.gstType = gstType;
 
     if (Array.isArray(items)) {
-      let newSubtotal = 0;
-      let newItemsTax = 0;
-
-      invoice.items = items.map(upd => {
-        const qty = Number(upd.acceptedQty ?? upd.receivedQty ?? upd.quantity) || 0;
-        const rate = Number(upd.unitPrice ?? upd.rate) || 0;
-        const taxRate = Number(upd.taxRate) || 0;
-        const lineTotal = qty * rate;
-        const lineTax = (lineTotal * taxRate) / 100;
-
-        newSubtotal += lineTotal;
-        newItemsTax += lineTax;
-
-        return {
-          productId: upd.productId,
-          productName: upd.productName,
-          sku: upd.sku || '',
-          hsn: upd.hsn || '',
-          unit: upd.unit || 'Strips',
-          orderedQty: Number(upd.orderedQty) || qty,
-          alreadyReceived: Number(upd.alreadyReceived) || 0,
-          receivedQty: qty,
-          acceptedQty: qty,
-          rejectedQty: 0,
-          remainingQty: 0,
-          batchNumber: upd.batchNumber || 'N/A',
-          mfgDate: upd.mfgDate || '',
-          expDate: upd.expDate || '',
-          unitPrice: rate,
-          taxRate,
-          subtotal: lineTotal,
-          tax: lineTax,
-          totalWithTax: lineTotal + lineTax
-        };
-      });
-
-      invoice.subtotal = newSubtotal;
-      invoice.totalTax = newItemsTax;
+      const grn = await GoodsReceipt.findOne({ consolidatedInvoiceId: invoice._id, status: 'completed' });
+      if (!grn) fail('A completed GRN is required to edit received invoice items.');
+      await updateReceiptItems(grn, items.map(item => ({
+        ...item, receivedQty: item.acceptedQty ?? item.receivedQty ?? item.quantity
+      })), req.user?.name || 'System');
+      await grn.save();
+      invoice.items = grn.items;
+      invoice.subtotal = grn.subtotal;
+      invoice.totalTax = grn.items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
     }
 
     if (freight) {
@@ -1123,7 +961,7 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 
     invoice.chargesSubtotal = cSub;
     invoice.chargesTax = cTax;
-    invoice.totalTax = (Number(invoice.totalTax) || 0) + cTax;
+    invoice.totalTax = invoice.items.reduce((sum, item) => sum + Number(item.tax || 0), 0) + cTax;
 
     const exactTotal = (Number(invoice.subtotal) || 0) + cSub + invoice.totalTax;
     const isInternational = invoice.currency && invoice.currency !== 'INR';
@@ -1134,6 +972,7 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     invoice.paymentStatus = (invoice.paidAmount || 0) >= invoice.grandTotal ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
     invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
 
+    settleInvoice(invoice);
     await invoice.save();
 
     if (invoice.grnIds && invoice.grnIds.length > 0) {
@@ -1149,16 +988,9 @@ exports.updateConsolidatedInvoice = async (req, res) => {
         grn.insurance = invoice.insurance;
         grn.inventoryCharges = invoice.inventoryCharges;
         grn.items = invoice.items;
+        grn.gstType = invoice.gstType;
         await grn.save();
       }
-    }
-
-    try {
-      if (syncAllAutomatedJournals) {
-        await syncAllAutomatedJournals();
-      }
-    } catch (e) {
-      console.warn('Sync error on updateInvoice:', e.message);
     }
 
     res.json({
@@ -1168,7 +1000,7 @@ exports.updateConsolidatedInvoice = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Update consolidated invoice error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    throw error;
   }
 };
 
@@ -1202,63 +1034,10 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
 
     for (const grnId of grnIds) {
       const grn = await GoodsReceipt.findById(grnId);
-      if (!grn) continue;
-
-      for (const item of grn.items || []) {
-        const receivedQty = Number(item.receivedQty) || Number(item.acceptedQty) || 0;
-        if (receivedQty <= 0) continue;
-
-        let product = null;
-        if (item.productId && mongoose.isValidObjectId(item.productId)) {
-          product = await Product.findById(item.productId);
-        }
-        if (!product && item.sku) {
-          product = await Product.findOne({ $or: [{ sku: item.sku }, { 'basicInfo.sku': item.sku }] });
-        }
-        if (!product && item.productName) {
-          product = await Product.findOne({ $or: [{ name: item.productName }, { 'basicInfo.name': item.productName }] });
-        }
-
-        if (product) {
-          const isBatch = (product.productType || 'batch') !== 'non-batch';
-          if (isBatch && Array.isArray(product.batches)) {
-            const idx = product.batches.findIndex(b => b.batchNumber === item.batchNumber);
-            if (idx > -1) {
-              product.batches[idx].quantity = Math.max(0, (Number(product.batches[idx].quantity) || 0) - receivedQty);
-              if (product.batches[idx].quantity === 0) product.batches.splice(idx, 1);
-            }
-            product.stock = product.batches.reduce((s, b) => s + (Number(b.quantity) || 0), 0);
-            product.markModified('batches');
-          } else {
-            product.stock = Math.max(0, (Number(product.stock) || 0) - receivedQty);
-          }
-          await product.save();
-        }
-      }
-
-      grn.invoiceGenerated = false;
-      grn.consolidatedInvoiceId = null;
-      grn.invoiceId = null;
-      await grn.save();
+      if (grn) await reverseReceipt(grn, req.user?.name || 'System');
     }
 
-    if (invoice.purchaseOrder) {
-      const po = await PurchaseOrder.findById(invoice.purchaseOrder);
-      if (po) {
-        (po.items || []).forEach(item => {
-          item.receivedQty = 0;
-          item.remainingQty = Number(item.quantity) || 0;
-        });
-        po.receivedPercentage = 0;
-        po.partiallyReceived = false;
-        if (['delivered', 'partially_received'].includes(po.status)) {
-          po.status = 'shipped';
-        }
-        po.markModified('items');
-        await po.save();
-      }
-    }
-
+    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before deleting this invoice.');
     await invoice.deleteOne();
 
     return res.json({
@@ -1267,7 +1046,7 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Delete Invoice error:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    throw error;
   }
 };
 
@@ -1326,16 +1105,8 @@ exports.addPayment = async (req, res) => {
       invoice.remainingAmount = Math.max(0, (invoice.grandTotal || 0) - invoice.paidAmount);
       invoice.paymentStatus = invoice.remainingAmount <= 0 ? 'paid' : (invoice.paidAmount > 0 ? 'partial' : 'pending');
       invoice.status = invoice.paymentStatus === 'paid' ? 'paid' : 'generated';
+      settleInvoice(invoice);
       await invoice.save();
-    }
-
-    // ⭐ Auto-sync journals immediately so JV-DSB is created in database right away!
-    try {
-      if (syncAllAutomatedJournals) {
-        await syncAllAutomatedJournals();
-      }
-    } catch (syncErr) {
-      console.error('Error auto-syncing journals upon payment:', syncErr);
     }
 
     return res.json({
@@ -1526,51 +1297,24 @@ exports.deleteGRN = async (req, res) => {
       ]
     });
 
-    for (const item of grn.items) {
-      const receivedQty = Number(item.receivedQty) || Number(item.acceptedQty) || 0;
-      if (receivedQty <= 0) continue;
-
-      let product = null;
-      if (item.productId && mongoose.isValidObjectId(item.productId)) {
-        product = await Product.findById(item.productId);
+    const invoiceId = grn.consolidatedInvoiceId || grn.invoiceId;
+    if (invoiceId) {
+      const invoice = await ConsolidatedInvoice.findById(invoiceId);
+      if (invoice && invoice.grnIds.some(id => idOf(id) !== idOf(grn._id))) {
+        fail('This legacy invoice links multiple GRNs. Reverse it from Purchase Invoices to keep accounting consistent.');
       }
-      if (!product && item.sku) {
-        product = await Product.findOne({ $or: [{ sku: item.sku }, { 'basicInfo.sku': item.sku }] });
-      }
-
-      if (product) {
-        const isBatch = (product.productType || 'batch') !== 'non-batch';
-        if (isBatch && Array.isArray(product.batches)) {
-          const batchIndex = product.batches.findIndex((b) => b.batchNumber === item.batchNumber);
-          if (batchIndex > -1) {
-            product.batches[batchIndex].quantity = Math.max(0, (Number(product.batches[batchIndex].quantity) || 0) - receivedQty);
-            if (product.batches[batchIndex].quantity === 0) product.batches.splice(batchIndex, 1);
-          }
-          product.stock = product.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
-          product.markModified('batches');
-        } else {
-          product.stock = Math.max(0, (Number(product.stock) || 0) - receivedQty);
-        }
-        await product.save();
+      if (invoice) {
+        await JournalEntry.deleteMany({ $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }] });
+        if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) fail('Cancel linked purchase returns before deleting this invoice.');
+    await invoice.deleteOne();
       }
     }
-
-    const po = await PurchaseOrder.findById(grn.purchaseOrder);
-    if (po) {
-      po.items.forEach((poItem) => {
-        poItem.receivedQty = 0;
-        poItem.remainingQty = Number(poItem.quantity) || 0;
-      });
-      po.receivedPercentage = 0;
-      po.partiallyReceived = false;
-      po.status = 'pending';
-      await po.save();
-    }
+    await reverseReceipt(grn, req.user?.name || 'System');
 
     await grn.deleteOne();
     res.json({ success: true, message: 'GRN and linked journals deleted successfully with stock reversal' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    throw error;
   }
 };
 
@@ -1727,3 +1471,10 @@ exports.sendPurchaseInvoiceEmail = async (req, res) => {
     });
   }
 };
+
+// Commit receipt, stock, purchase and invoice changes as one operation.
+for (const name of ['addPayment', 'createGRN', 'updateGRN', 'updateConsolidatedInvoice', 'deleteGRN', 'deleteConsolidatedInvoice']) {
+  exports[name] = receiptTransaction(exports[name], syncAllAutomatedJournals);
+}
+
+exports.addConsolidatedPayment = exports.addPayment;

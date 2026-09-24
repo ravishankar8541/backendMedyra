@@ -12,8 +12,9 @@ const PriceListItemSchema = new mongoose.Schema({
   unit: { type: String, default: 'Pcs' },
   costPrice: { type: Number, required: true, min: 0 },
   defaultQty: { type: Number, default: 1, min: 1 },
-  batchNumber: { type: String, default: '' },
-  isBatchProduct: { type: Boolean, default: true },
+  // Legacy batch assignments are retained for old records, never used for receiving.
+  batchNumber: { type: String, select: false },
+  isBatchProduct: { type: Boolean, select: false },
   notes: { type: String, default: '' }
 }, { _id: true });
 
@@ -36,7 +37,6 @@ const VendorPriceListSchema = new mongoose.Schema({
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 }, { timestamps: true });
 
-VendorPriceListSchema.index({ supplierId: 1 });
 VendorPriceListSchema.index({ 'items.productId': 1 });
 
 module.exports =
