@@ -717,6 +717,8 @@ exports.createGRN = async (req, res) => {
         mfgDate: userMfgDate,
         expDate: userExpDate,
         unitPrice: rate,
+        supplierName: finalSupplierName, // ✅ ADDED: Supplier name on each item
+        supplier: possibleSupId || null, // ✅ ADDED: Supplier ID on each item
         mrp:
           rawMrp > 0
             ? rawMrp

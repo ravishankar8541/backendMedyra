@@ -143,7 +143,9 @@ async function moveStock(row, direction, doc, actor) {
           sellingPrice: row.unitPrice * 1.2,
           addedDate: new Date().toISOString().slice(0, 10),
           addedBy: actor,
-          reason: `Restocked from return ${doc.returnNumber}`
+          reason: `Restocked from return ${doc.returnNumber}`,
+          supplierName: doc.supplierName || doc.supplier || '', // ✅ ADDED
+          supplier: doc.supplierId || null // ✅ ADDED
         });
       }
     }
@@ -167,7 +169,7 @@ async function moveStock(row, direction, doc, actor) {
     sourceGRN: row.grnId,
     sourceGRNItem: row.invoiceItemId,
     purchaseOrder: doc.purchaseOrder,
-    supplierName: doc.supplierName || doc.supplier,
+    supplierName: doc.supplierName || doc.supplier || '', // ✅ Ensured
     addedBy: actor,
     costPrice: row.unitPrice * (doc.currency === 'INR' ? 1 : doc.exchangeRate),
     reason:
@@ -473,6 +475,9 @@ exports.receiveReplacement = transaction(async (req, res) => {
         lot.quantity = qtyRound(lot.quantity + qty);
         if (rep.expDate) lot.expDate = rep.expDate;
         if (rep.mfgDate) lot.mfgDate = rep.mfgDate;
+        // ✅ Ensure supplier info is present even on existing lot
+        if (!lot.supplierName) lot.supplierName = doc.supplierName || doc.supplier || '';
+        if (!lot.supplier) lot.supplier = doc.supplierId || null;
       } else {
         product.batches.push({
           batchNumber: batchNo,
@@ -484,7 +489,9 @@ exports.receiveReplacement = transaction(async (req, res) => {
           sellingPrice: targetItem.unitPrice * 1.2,
           addedDate: receivedDate,
           addedBy: req.user?.name || 'System',
-          reason: `Replacement received (${alreadyReplaced + qty}/${targetItem.quantity}) for ${doc.returnNumber}`
+          reason: `Replacement received (${alreadyReplaced + qty}/${targetItem.quantity}) for ${doc.returnNumber}`,
+          supplierName: doc.supplierName || doc.supplier || '', // ✅ ADDED
+          supplier: doc.supplierId || null // ✅ ADDED
         });
       }
       product.markModified('batches');
@@ -499,7 +506,7 @@ exports.receiveReplacement = transaction(async (req, res) => {
       batchNumber: batchNo,
       sourceGRN: targetItem.grnId,
       purchaseOrder: doc.purchaseOrder,
-      supplierName: doc.supplierName || doc.supplier,
+      supplierName: doc.supplierName || doc.supplier || '', // ✅ Ensured
       addedBy: req.user?.name || 'System',
       costPrice: targetItem.unitPrice * (doc.currency === 'INR' ? 1 : doc.exchangeRate),
       reason: `Replacement stock received (${alreadyReplaced + qty}/${targetItem.quantity}) for ${doc.returnNumber}`,
