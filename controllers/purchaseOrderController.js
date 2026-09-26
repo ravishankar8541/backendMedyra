@@ -411,6 +411,12 @@ exports.sendPOEmail = async (req, res) => {
       to: to.trim(),
       cc: validCc,
       subject: subject || `Purchase Order #${poNumber || ''} - Medyra Pharmaceutical`,
+      text: body || String(mailHtml)
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<br\s*\/?\s*>|<\/p>|<\/div>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&amp;/gi, '&').trim(),
       html: mailHtml,
       attachments
     });

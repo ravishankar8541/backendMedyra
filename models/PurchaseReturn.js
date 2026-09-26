@@ -44,6 +44,8 @@ const PurchaseReturnItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  // Snapshot in inventory currency (INR); absent on legacy returns.
+  mrp: { type: Number, min: 0 },
   taxRate: {
     type: Number,
     default: 0
@@ -81,6 +83,7 @@ const ReplacementHistorySchema = new mongoose.Schema({
       productName: String,
       quantity: Number,
       batchNumber: String,
+      mrp: { type: Number, min: 0 },
       mfgDate: String,
       expDate: String,
       unit: String
@@ -211,6 +214,5 @@ const PurchaseReturnSchema = new mongoose.Schema(
 
 PurchaseReturnSchema.index({ requestId: 1 }, { unique: true, sparse: true });
 PurchaseReturnSchema.index({ invoice: 1, status: 1 });
-PurchaseReturnSchema.index({ returnNumber: 1 });
 
 module.exports = mongoose.models.PurchaseReturn || mongoose.model('PurchaseReturn', PurchaseReturnSchema);

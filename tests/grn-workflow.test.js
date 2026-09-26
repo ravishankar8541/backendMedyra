@@ -457,3 +457,59 @@ test('foreign-currency fractional returns preserve rates, GST split and stock pr
   await ok(returns.cancelPurchaseReturn, { reason: 'Goods retained' }, { id: doc._id });
   assert.equal((await Product.findById(product._id)).stock, 0.8);
 });
+
+test('replacement receipts preserve MRP across partial rounds and separate changed MRP', async () => {
+  const { product, po } = await setup(100);
+  const grn = await ok(receipt.createGRN, input(po, 100, 'MRP-ORIGINAL'));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const doc = await ok(returns.createPurchaseReturn, returnInput(invoice, 20));
+  assert.equal(doc.items[0].mrp, 80);
+  const item = { itemId: String(doc.items[0]._id), productId: String(product._id), quantity: 5, batchNumber: 'MRP-NEW' };
+  for (const mrp of ['', 100, 0]) {
+    await ok(returns.receiveReplacement, { items: [{ ...item, mrp }], receivedDate: '2026-09-26' }, { id: doc._id });
+  }
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.stock, 95);
+  assert.deepEqual(stock.batches.filter(b => b.batchNumber === 'MRP-NEW').map(b => b.mrp), [80, 100, 0]);
+  assert.deepEqual(stock.stockMovements.slice(-3).map(m => m.mrp), [80, 100, 0]);
+  const updated = await PurchaseReturn.findById(doc._id);
+  assert.equal(updated.replacementStatus, 'partial');
+  assert.deepEqual(updated.replacementHistory.map(h => h.items[0].mrp), [80, 100, 0]);
+  await ok(returns.receiveReplacement, { items: [item] }, { id: doc._id });
+  assert.equal((await PurchaseReturn.findById(doc._id)).replacementStatus, 'received');
+});
+
+test('legacy pending replacement resolves MRP from original GRN when lot is missing', async () => {
+  const { product, po } = await setup(100);
+  const grn = await ok(receipt.createGRN, input(po, 100, 'LEGACY-MRP'));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const doc = await ok(returns.createPurchaseReturn, returnInput(invoice, 100));
+  await PurchaseReturn.updateOne({ _id: doc._id }, { $unset: { 'items.0.mrp': '' } });
+  await Product.updateOne({ _id: product._id }, { $set: { batches: [] } });
+  await ok(returns.receiveReplacement, { items: [{ itemId: doc.items[0]._id, quantity: 100, batchNumber: 'LEGACY-NEW' }] }, { id: doc._id });
+  assert.equal((await Product.findById(product._id)).batches[0].mrp, 80);
+});
+
+test('invalid replacement MRP rolls back stock and return counters', async () => {
+  const { product, po } = await setup(10);
+  const grn = await ok(receipt.createGRN, input(po, 10, 'INVALID-MRP'));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const doc = await ok(returns.createPurchaseReturn, returnInput(invoice, 5));
+  for (const mrp of [-1, 'abc', 'Infinity', ' ', false]) {
+    const response = await call(returns.receiveReplacement, { items: [{ itemId: doc.items[0]._id, quantity: 1, mrp }] }, { id: doc._id });
+    assert.equal(response.success, false);
+    assert.equal((await Product.findById(product._id)).stock, 5);
+    assert.equal((await PurchaseReturn.findById(doc._id)).items[0].replacedQty, 0);
+  }
+});
+
+test('non-batch replacement records MRP in stock movement', async () => {
+  const { product, po } = await setup(10, 'non-batch');
+  const grn = await ok(receipt.createGRN, input(po, 10, 'N/A'));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const doc = await ok(returns.createPurchaseReturn, returnInput(invoice, 5));
+  await ok(returns.receiveReplacement, { items: [{ itemId: doc.items[0]._id, quantity: 5 }] }, { id: doc._id });
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.stock, 10);
+  assert.equal(stock.stockMovements.at(-1).mrp, 80);
+});

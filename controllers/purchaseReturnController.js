@@ -88,6 +88,9 @@ async function getSource(invoiceId) {
       invoiceItemId: row._id,
       grnId: grn?._id,
       stockBatchId: source?.stockBatchId,
+      mrp: source?.mrp != null || row.mrp != null
+        ? money(Number(source?.mrp ?? row.mrp) * (invoice.currency === 'INR' ? 1 : invoice.exchangeRate))
+        : lot?.mrp ?? product?.pricing?.mrp,
       receivedQty: received,
       returnedQty,
       availableStock: Math.max(0, availableStock),
@@ -101,6 +104,31 @@ async function getSource(invoiceId) {
   }
 
   return { invoice, items };
+}
+
+// Legacy returns have no MRP snapshot. Resolve only their linked stock/GRN.
+async function replacementMrp(input, row, product, doc) {
+  const supplied = input !== undefined && input !== null && input !== '';
+  let value = supplied ? input : row.mrp;
+  if (value == null) {
+    const lot = row.stockBatchId && product.batches.id(row.stockBatchId);
+    if (lot && Number(lot.mrp) > 0) value = lot.mrp;
+    if (value == null && row.grnId) {
+      const grn = await GoodsReceipt.findById(row.grnId);
+      const source = grn?.items.find(i =>
+        (row.stockBatchId && idOf(i.stockBatchId) === idOf(row.stockBatchId)) ||
+        idOf(i._id) === idOf(row.invoiceItemId));
+      if (source?.mrp != null) {
+        value = money(Number(source.mrp) * (doc.currency === 'INR' ? 1 : doc.exchangeRate));
+      }
+    }
+    if (value == null && Number(product.pricing?.mrp) > 0) value = product.pricing.mrp;
+  }
+  if (value == null || !['number', 'string'].includes(typeof value) ||
+      String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
+    fail('Enter a valid replacement MRP (INR) for ' + row.productName + '.');
+  }
+  return money(Number(value));
 }
 
 async function refreshCredit(invoice) {
@@ -257,6 +285,7 @@ const create = async (req, res) => {
       quantity,
       replacedQty: 0,
       unitPrice: source.unitPrice,
+      mrp: source.mrp,
       taxRate: source.taxRate,
       total,
       totalWithTax: money(total + tax),
@@ -463,6 +492,8 @@ exports.receiveReplacement = transaction(async (req, res) => {
     const product = await Product.findById(targetItem.product);
     if (!product) fail(`Product not found: ${targetItem.productName}`);
 
+    const mrp = await replacementMrp(rep.mrp, targetItem, product, doc);
+
     const batchNo = (
       rep.batchNumber ||
       targetItem.batchNumber ||
@@ -470,7 +501,8 @@ exports.receiveReplacement = transaction(async (req, res) => {
     ).trim();
 
     if (product.productType !== 'non-batch') {
-      let lot = product.batches.find((b) => String(b.batchNumber).trim() === batchNo);
+      // Keep differently priced stock separate, even when the batch number matches.
+      let lot = product.batches.find((b) => String(b.batchNumber).trim() === batchNo && Number(b.mrp) === mrp);
       if (lot) {
         lot.quantity = qtyRound(lot.quantity + qty);
         if (rep.expDate) lot.expDate = rep.expDate;
@@ -481,6 +513,7 @@ exports.receiveReplacement = transaction(async (req, res) => {
       } else {
         product.batches.push({
           batchNumber: batchNo,
+          mrp,
           mfgDate: rep.mfgDate || '',
           expDate: rep.expDate || '',
           quantity: qty,
@@ -503,6 +536,7 @@ exports.receiveReplacement = transaction(async (req, res) => {
     product.stockMovements.push({
       type: 'add',
       quantity: qty,
+      mrp,
       batchNumber: batchNo,
       sourceGRN: targetItem.grnId,
       purchaseOrder: doc.purchaseOrder,
@@ -520,6 +554,7 @@ exports.receiveReplacement = transaction(async (req, res) => {
       productId: product._id,
       productName: product.name,
       quantity: qty,
+      mrp,
       batchNumber: batchNo,
       mfgDate: rep.mfgDate || '',
       expDate: rep.expDate || '',
