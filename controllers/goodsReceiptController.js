@@ -1,12 +1,14 @@
 // controllers/goodsReceiptController.js
 const mongoose = require('mongoose');
+const purchaseInvoiceLogo = require('../utils/documentLogo');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 const PurchaseReturn = require('../models/PurchaseReturn');
 const { settleInvoice, money } = require('../utils/purchaseSettlement');
 const JournalEntry = require('../models/JournalEntry');
-const nodemailer = require('nodemailer');
+const { getTransport, emailError } = require('../utils/poEmail');
+const { isEmail } = require('validator');
 const receiptTransaction = require('../utils/receiptTransaction');
 const {
   idOf,
@@ -305,7 +307,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td class="text-center" style="font-weight:800;">1</td>
           <td class="text-center">—</td>
           <td class="text-right">${freight.toFixed(2)}</td>
-          <td class="text-center">${Number(invoice.freight?.taxRate || 18)}%</td>
+          <td class="text-center">${Number(invoice.freight?.taxRate ?? 0)}%</td>
           <td class="text-right" style="font-weight:900;">${freight.toFixed(2)}</td>
         </tr>`;
     }
@@ -319,7 +321,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td class="text-center" style="font-weight:800;">1</td>
           <td class="text-center">—</td>
           <td class="text-right">${insurance.toFixed(2)}</td>
-          <td class="text-center">${Number(invoice.insurance?.taxRate || 18)}%</td>
+          <td class="text-center">${Number(invoice.insurance?.taxRate ?? 0)}%</td>
           <td class="text-right" style="font-weight:900;">${insurance.toFixed(2)}</td>
         </tr>`;
     }
@@ -333,7 +335,7 @@ exports.getPublicInvoiceView = async (req, res) => {
           <td class="text-center" style="font-weight:800;">1</td>
           <td class="text-center">—</td>
           <td class="text-right">${inventory.toFixed(2)}</td>
-          <td class="text-center">${Number(invoice.inventoryCharges?.taxRate || 18)}%</td>
+          <td class="text-center">${Number(invoice.inventoryCharges?.taxRate ?? 0)}%</td>
           <td class="text-right" style="font-weight:900;">${inventory.toFixed(2)}</td>
         </tr>`;
     }
@@ -381,8 +383,7 @@ exports.getPublicInvoiceView = async (req, res) => {
       <tr>
         <td style="vertical-align:top; width:60%;">
           <div class="logo-box" style="margin-bottom:8px;">
-            <img src="https://medyra-frontend-new-cwlc.vercel.app/medyraWhiteLogo.png" class="logo-img" alt="Medyra"
-              onerror="this.style.display='none';this.parentElement.innerHTML='<span style=\\'color:#fff;font-weight:900;font-size:16px;\\'>MEDYRA</span>'"/>
+            <img src="${purchaseInvoiceLogo}" class="logo-img" alt="Medyra"/>
           </div>
           <div style="font-size:10px; color:#334155;">
             <p style="font-weight:800;font-size:11px;">Medyra Pharmaceutical</p>
@@ -458,8 +459,6 @@ exports.getPublicInvoiceView = async (req, res) => {
           <span style="color:#059669;font-weight:700;">Paid</span>
           <span style="font-weight:800;color:#059669;">${symbol}${paidAmt.toFixed(2)}</span>
         </div>
-        <div class="total-row"><span>Return Credit</span><span>${symbol}${Number(invoice.returnCredit || 0).toFixed(2)}</span></div>
-        <div class="total-row"><span>Supplier Credit</span><span>${symbol}${Number(invoice.supplierCredit || 0).toFixed(2)}</span></div>
         <div class="total-row" style="padding:6px 8px;border-bottom:none;background:#f1f5f9;border-radius:4px;">
           <span style="color:${balanceAmt > 0 ? '#dc2626' : '#059669'};font-weight:700;">Dues</span>
           <span style="font-weight:900;color:${balanceAmt > 0 ? '#dc2626' : '#059669'};">${symbol}${balanceAmt.toFixed(2)}</span>
@@ -1396,6 +1395,7 @@ exports.addPayment = async (req, res) => {
       .toLowerCase()
       .replace(/\s+/g, '_');
     const paymentEntry = {
+      _id: new mongoose.Types.ObjectId(),
       date: date || paymentDate || new Date().toISOString().split('T')[0],
       amount: paymentAmount,
       method: cleanMethod,
@@ -1776,109 +1776,61 @@ exports.getReceiptDashboard = async (req, res) => {
 // SEND PURCHASE INVOICE VIA EMAIL
 // ============================================
 exports.sendPurchaseInvoiceEmail = async (req, res) => {
+  let emailData;
   try {
-    let emailData = req.body;
-
-    if (req.body.emailData) {
-      if (typeof req.body.emailData === 'string') {
-        try {
-          emailData = JSON.parse(req.body.emailData);
-        } catch (e) {
-          emailData = req.body;
-        }
-      } else {
-        emailData = req.body.emailData;
-      }
-    }
-
-    const { to, cc, subject, body, html, invoiceNumber } = emailData;
-
-    if (!to || !to.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Recipient email is required'
-      });
-    }
-
-    const attachments = [];
-    if (req.file && req.file.buffer) {
-      attachments.push({
-        filename: req.file.originalname || `PI-${invoiceNumber || 'document'}.pdf`,
+    emailData = req.body?.emailData ?? req.body;
+    if (typeof emailData === 'string') emailData = JSON.parse(emailData);
+  } catch {
+    return res.status(400).json({ success: false, error: 'Invalid email data.' });
+  }
+  if (!emailData || typeof emailData !== 'object' || Array.isArray(emailData)) {
+    return res.status(400).json({ success: false, error: 'Email data is required.' });
+  }
+  const { to, cc, subject, body, invoiceNumber } = emailData;
+  if (typeof to !== 'string' || !isEmail(to.trim()) ||
+      (cc && (typeof cc !== 'string' || !isEmail(cc.trim()))) ||
+      [subject, body, invoiceNumber].some(value => value != null && typeof value !== 'string')) {
+    return res.status(400).json({ success: false, error: 'Enter a valid recipient and optional CC email address, with text email fields.' });
+  }
+  if (!req.file?.buffer || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') {
+    return res.status(400).json({ success: false, error: 'A valid purchase invoice PDF attachment is required.' });
+  }
+  try {
+    const { transporter, user } = getTransport();
+    const text = body || 'Please find attached our official Purchase Invoice #' + (invoiceNumber || '') + '.\n\nMedyra Pharmaceutical';
+    const escaped = text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    // sendMail connects and authenticates itself; verify() would do that twice.
+    const info = await transporter.sendMail({
+      from: { name: 'Medyra Pharmaceutical', address: user },
+      to: to.trim(),
+      cc: cc?.trim() || undefined,
+      subject: subject?.trim() || 'Purchase Invoice #' + (invoiceNumber || '') + ' - Medyra Pharmaceutical',
+      text,
+      html: '<div style="font-family:Arial,sans-serif;white-space:pre-wrap">' + escaped + '</div>',
+      attachments: [{
+        filename: 'PI-' + (invoiceNumber || 'document').replace(/[^a-zA-Z0-9_.-]/g, '_') + '.pdf',
         content: req.file.buffer,
         contentType: 'application/pdf'
-      });
-    }
-
-    const mailHtml =
-      html ||
-      (body
-        ? body.replace(/\n/g, '<br/>')
-        : `
-      <div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">
-        <p>Dear Sir/Madam,</p>
-        <p>Please find attached our Purchase Invoice <strong>#${invoiceNumber || ''}</strong>.</p>
-        <p>Thank you,<br/>Medyra Pharmaceutical</p>
-      </div>
-    `);
-
-    const mailUser = (process.env.EMAIL_USER || '').trim();
-    const mailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
-
-    if (!mailUser || !mailPass) {
-      return res.status(500).json({
-        success: false,
-        error: 'EMAIL_USER / EMAIL_PASS not configured'
-      });
-    }
-
-    const validCc =
-      cc &&
-      typeof cc === 'string' &&
-      cc.trim().length > 3 &&
-      cc.includes('@') &&
-      !cc.includes('example.com')
-        ? cc.trim()
-        : undefined;
-
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-        user: mailUser,
-        pass: mailPass
-      },
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
-      socketTimeout: 20000,
-      tls: { rejectUnauthorized: false }
+      }]
     });
-
-    await transporter.verify();
-
-    const info = await transporter.sendMail({
-      from: `"Medyra Pharmaceutical" <${mailUser}>`,
-      to: to.trim(),
-      cc: validCc,
-      subject: subject || `Purchase Invoice #${invoiceNumber || ''} - Medyra Pharmaceutical`,
-      html: mailHtml,
-      attachments
-    });
-
+    const accepted = (info.accepted || []).map(address => String(address).toLowerCase());
+    if (!accepted.includes(to.trim().toLowerCase())) {
+      return res.status(502).json({ success: false, error: 'The mail server did not accept the vendor address. A CC recipient may have received the message; check before resending.' });
+    }
+    const warnings = [];
+    if (info.rejected?.length) warnings.push('The vendor email was accepted, but the CC recipient was rejected.');
     return res.status(200).json({
-      success: true,
-      message: `Email successfully sent to ${to.trim()}`,
-      messageId: info.messageId
+      success: true, message: 'Mail server accepted the purchase invoice for delivery.',
+      messageId: info.messageId, warning: warnings.join(' ') || undefined
     });
   } catch (error) {
-    console.error('❌ Send Purchase Invoice Email Error:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to send email',
-      code: error.code || null
+    console.error('PI email failed:', { code: error.code, command: error.command, responseCode: error.responseCode });
+    return res.status(error.code === 'EMAIL_CONFIG' ? 503 : 502).json({
+      success: false, code: error.code || 'EMAIL_SEND_FAILED', error: emailError(error, 'purchase invoice')
     });
   }
 };
+
 
 // Commit receipt, stock, purchase and invoice changes as one operation.
 for (const name of [

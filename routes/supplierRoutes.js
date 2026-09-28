@@ -10,6 +10,7 @@ const {
   deleteSupplier
 } = require('../controllers/supplierController');
 const { protect, restrictTo } = require('../middleware/auth');
+const { getVendorLedger } = require('../controllers/vendorLedgerController');
 
 // Complete Indian State & UT Codes Map
 const GST_STATE_MAP = {
@@ -179,6 +180,7 @@ router.get('/verify-gst/:gstin', async (req, res) => {
 // CRUD SUPPLIER ROUTES
 // ============================================
 router.get('/', getSuppliers);
+router.get('/:id/ledger', getVendorLedger);
 router.get('/:id', getSupplier);
 router.post('/', restrictTo('admin', 'manager'), supplierValidation, createSupplier);
 router.put('/:id', restrictTo('admin', 'manager'), supplierValidation, updateSupplier);

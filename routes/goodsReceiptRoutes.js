@@ -3,7 +3,9 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: {
+  fileSize: 10 * 1024 * 1024, files: 1, fields: 10, fieldSize: 64 * 1024
+} });
 
 const { protect, restrictTo } = require('../middleware/auth');
 const ctrl = require('../controllers/goodsReceiptController');
@@ -49,8 +51,16 @@ router.delete(
 // Send Purchase Invoice Email (PDF field name = "pdf")
 router.post(
   '/invoices/send-email',
-  upload.single('pdf'),
   restrictTo('admin', 'manager'),
+  (req, res, next) => upload.single('pdf')(req, res, error => {
+    if (!error) return next();
+    return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      success: false,
+      error: error.code === 'LIMIT_FILE_SIZE'
+        ? 'The invoice PDF exceeds the 10 MB email limit.'
+        : 'Invalid upload. Attach one invoice PDF and the email details.'
+    });
+  }),
   ctrl.sendPurchaseInvoiceEmail
 );
 

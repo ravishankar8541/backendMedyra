@@ -1,7 +1,8 @@
 // controllers/purchaseOrderController.js
 require('dotenv').config();
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
+const { getTransport, emailError } = require('../utils/poEmail');
+const { isEmail } = require('validator');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 
@@ -317,131 +318,71 @@ exports.getPublicPOView = async (req, res) => {
 // SEND PO VIA EMAIL (FIXED FOR TITAN SMTP GREETING TIMEOUT)
 // ============================================
 exports.sendPOEmail = async (req, res) => {
+  let emailData;
   try {
-    let emailData = req.body;
-
-    if (req.body.emailData) {
-      if (typeof req.body.emailData === 'string') {
-        try {
-          emailData = JSON.parse(req.body.emailData);
-        } catch (e) {
-          emailData = req.body;
-        }
-      } else {
-        emailData = req.body.emailData;
-      }
-    }
-
-    const { to, cc, subject, body, html, poNumber } = emailData;
-
-    if (!to || !to.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Recipient email is required'
-      });
-    }
-
-    const attachments = [];
-    if (req.file && req.file.buffer) {
-      attachments.push({
-        filename: req.file.originalname || `PO-${poNumber || 'document'}.pdf`,
+    emailData = req.body?.emailData ?? req.body;
+    if (typeof emailData === 'string') emailData = JSON.parse(emailData);
+  } catch {
+    return res.status(400).json({ success: false, error: 'Invalid email data.' });
+  }
+  if (!emailData || typeof emailData !== 'object' || Array.isArray(emailData)) {
+    return res.status(400).json({ success: false, error: 'Email data is required.' });
+  }
+  const { to, cc, subject, body, poNumber } = emailData;
+  if (typeof to !== 'string' || !isEmail(to.trim()) ||
+      (cc && (typeof cc !== 'string' || !isEmail(cc.trim()))) ||
+      [subject, body, poNumber].some(value => value != null && typeof value !== 'string')) {
+    return res.status(400).json({ success: false, error: 'Enter a valid recipient and optional CC email address, with text email fields.' });
+  }
+  if (!req.file?.buffer || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') {
+    return res.status(400).json({ success: false, error: 'A valid purchase order PDF attachment is required.' });
+  }
+  try {
+    const { transporter, user } = getTransport();
+    const text = body || 'Please find attached our official Purchase Order #' + (poNumber || '') + '.\n\nMedyra Pharmaceutical';
+    const escaped = text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    // sendMail connects and authenticates itself; verify() would do that twice.
+    const info = await transporter.sendMail({
+      from: { name: 'Medyra Pharmaceutical', address: user },
+      to: to.trim(),
+      cc: cc?.trim() || undefined,
+      subject: subject?.trim() || 'Purchase Order #' + (poNumber || '') + ' - Medyra Pharmaceutical',
+      text,
+      html: '<div style="font-family:Arial,sans-serif;white-space:pre-wrap">' + escaped + '</div>',
+      attachments: [{
+        filename: 'PO-' + (poNumber || 'document').replace(/[^a-zA-Z0-9_.-]/g, '_') + '.pdf',
         content: req.file.buffer,
         contentType: 'application/pdf'
-      });
-    }
-
-    const mailHtml =
-      html ||
-      (body
-        ? body.replace(/\n/g, '<br/>')
-        : `
-      <div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">
-        <p>Dear Sir/Madam,</p>
-        <p>Please find attached our official Purchase Order <strong>#${poNumber || ''}</strong>.</p>
-        <p>Thank you,<br/>Medyra Pharmaceutical</p>
-      </div>
-    `);
-
-    const mailHost = (process.env.EMAIL_HOST || 'smtp.titan.email').trim();
-    const mailPort = parseInt(process.env.EMAIL_PORT, 10) || 587;
-    const mailUser = (process.env.EMAIL_USER || '').trim();
-    const mailPass = (process.env.EMAIL_PASS || '').trim();
-
-    if (!mailUser || !mailPass) {
-      return res.status(500).json({
-        success: false,
-        error: 'EMAIL_USER / EMAIL_PASS not configured on server'
-      });
-    }
-
-    const validCc =
-      cc &&
-      typeof cc === 'string' &&
-      cc.trim().length > 3 &&
-      cc.includes('@') &&
-      !cc.includes('example.com')
-        ? cc.trim()
-        : undefined;
-
-    // Titan Email Transporter with correct TLS & Timeouts
-    const isPort465 = mailPort === 465;
-
-    const transporter = nodemailer.createTransport({
-      host: mailHost,
-      port: mailPort,
-      secure: isPort465, // true for 465, false for 587
-      auth: {
-        user: mailUser,
-        pass: mailPass
-      },
-      tls: {
-        rejectUnauthorized: false,
-        minVersion: 'TLSv1.2'
-      },
-      connectionTimeout: 40000,
-      greetingTimeout: 30000,
-      socketTimeout: 40000,
-      dnsTimeout: 15000
+      }]
     });
-
-    await transporter.verify();
-
-    const info = await transporter.sendMail({
-      from: `"Medyra Pharmaceutical" <${mailUser}>`,
-      to: to.trim(),
-      cc: validCc,
-      subject: subject || `Purchase Order #${poNumber || ''} - Medyra Pharmaceutical`,
-      text: body || String(mailHtml)
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<br\s*\/?\s*>|<\/p>|<\/div>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-        .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&amp;/gi, '&').trim(),
-      html: mailHtml,
-      attachments
-    });
-
+    const accepted = (info.accepted || []).map(address => String(address).toLowerCase());
+    if (!accepted.includes(to.trim().toLowerCase())) {
+      return res.status(502).json({ success: false, error: 'The mail server did not accept the vendor address. A CC recipient may have received the message; check before resending.' });
+    }
+    const warnings = [];
+    if (info.rejected?.length) warnings.push('The vendor email was accepted, but the CC recipient was rejected.');
+    const emailSentDate = new Date().toISOString();
     if (poNumber) {
-      await PurchaseOrder.findOneAndUpdate(
-        { poNumber },
-        {
-          emailSent: true,
-          emailSentDate: new Date().toISOString()
-        }
-      );
+      try {
+        const updated = await PurchaseOrder.findOneAndUpdate(
+          { poNumber }, { emailSent: true, emailSentDate },
+          { maxTimeMS: 5000, bufferCommands: false }
+        );
+        if (!updated) warnings.push('Email accepted, but the purchase order record was not found. Do not resend.');
+      } catch (error) {
+        // SMTP already accepted the message. A database error must not invite a duplicate send.
+        console.error('PO email status update failed:', error.code || error.name);
+        warnings.push('Email accepted, but its saved status could not be updated. Do not resend.');
+      }
     }
-
     return res.status(200).json({
-      success: true,
-      message: `Email successfully sent to ${to.trim()}`,
-      messageId: info.messageId
+      success: true, message: 'Mail server accepted the purchase order for delivery.',
+      messageId: info.messageId, emailSentDate, warning: warnings.join(' ') || undefined
     });
   } catch (error) {
-    console.error('❌ Send Email Error:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'SMTP connection or authentication failed'
+    console.error('PO email failed:', { code: error.code, command: error.command, responseCode: error.responseCode });
+    return res.status(error.code === 'EMAIL_CONFIG' ? 503 : 502).json({
+      success: false, code: error.code || 'EMAIL_SEND_FAILED', error: emailError(error)
     });
   }
 };

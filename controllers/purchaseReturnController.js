@@ -1,6 +1,7 @@
 // controllers/purchaseReturnController.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const documentLogo = require('../utils/documentLogo');
 const PurchaseReturn = require('../models/PurchaseReturn');
 const Product = require('../models/Product');
 const { GoodsReceipt, ConsolidatedInvoice } = require('../models/GoodsReceipt');
@@ -860,8 +861,7 @@ exports.getPublicDebitNoteView = async (req, res) => {
         <tr>
           <td style="vertical-align:top; width:58%;">
             <div class="logo-box">
-              <img src="https://medyra-frontend-new-cwlc.vercel.app/medyraWhiteLogo.png" class="logo-img" alt="Medyra"
-                onerror="this.style.display='none';this.parentElement.innerHTML='<span style=\\'color:#fff;font-weight:900;font-size:16px;\\'>MEDYRA</span>'"/>
+              <img src="${documentLogo}" class="logo-img" alt="Medyra"/>
             </div>
             <div style="font-size:10px; color:#334155; line-height:1.45;">
               <p style="font-weight:800;font-size:11px;color:#000;">Medyra Pharmaceutical</p>
