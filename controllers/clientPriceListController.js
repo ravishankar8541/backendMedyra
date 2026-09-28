@@ -90,31 +90,8 @@ exports.upsertClientPriceList = async (req, res) => {
       const defaultQty = Math.max(1, parseInt(raw.defaultQty) || 1);
       const unit = (raw.unit || product.unit || 'Pcs').trim();
       const taxRate = raw.taxRate !== undefined ? parseFloat(raw.taxRate) : (product.pricing?.taxRate || 5);
-      const batchNo = (raw.batchNumber || '').trim();
+      const batchNo = ''; // Pricing does not allocate or create inventory batches.
       const isBatch = (product.productType || 'batch') !== 'non-batch';
-
-      // ✅ AUTO-REGISTER NEW BATCH IN PRODUCT INVENTORY IF ENTERED
-      if (isBatch && batchNo && batchNo !== 'N/A') {
-        if (!Array.isArray(product.batches)) product.batches = [];
-        const batchExists = product.batches.some(
-          (b) => (b.batchNumber || '').trim().toLowerCase() === batchNo.toLowerCase()
-        );
-
-        if (!batchExists) {
-          product.batches.push({
-            batchNumber: batchNo,
-            quantity: 0,
-            costPrice: product.pricing?.costPrice || 0,
-            mrp: product.pricing?.mrp || 0,
-            sellingPrice: client.currency === 'INR' ? sellingPrice : (product.pricing?.sellingPrice || sellingPrice),
-            addedDate: new Date().toISOString().split('T')[0],
-            addedBy: req.user?.name || 'Client Sales Price List',
-            reason: `Registered via Client Sales Price List (${client.name || client.companyName})`
-          });
-          product.markModified('batches');
-          await product.save();
-        }
-      }
 
       cleanItems.push({
         productId: product._id,

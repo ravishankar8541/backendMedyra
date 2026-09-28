@@ -37,9 +37,9 @@ exports.addInvoicePayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid payment amount' });
     }
 
-    const currentDue = invoice.dueAmount !== undefined ? invoice.dueAmount : (invoice.total - (invoice.paidAmount || 0));
+    const currentDue = require('../utils/salesReturnAmounts').balance(invoice).dueAmount;
     
-    if (payAmount > currentDue + 0.5) {
+    if (payAmount > currentDue + 0.01) {
       return res.status(400).json({
         success: false,
         message: `Payment amount (₹${payAmount}) exceeds remaining balance (₹${currentDue.toFixed(2)})`
@@ -56,6 +56,10 @@ exports.addInvoicePayment = async (req, res) => {
     };
 
     if (!invoice.payments) invoice.payments = [];
+    const recordedPaid = invoice.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    const legacyPaid = Math.round((Number(invoice.paidAmount || 0) - recordedPaid) * 100) / 100;
+    if (legacyPaid > 0) invoice.payments.push({ amount: legacyPaid, date: invoice.paymentDate || invoice.date,
+      method: invoice.paymentMethod || 'other', reference: invoice.paymentReference || '', notes: 'Previously recorded invoice payment balance' });
     invoice.payments.push(newPayment);
 
     let totalPaid = 0;
@@ -64,7 +68,7 @@ exports.addInvoicePayment = async (req, res) => {
     });
 
     invoice.paidAmount = Math.round(totalPaid * 100) / 100;
-    invoice.dueAmount = Math.max(0, Math.round((invoice.total - totalPaid) * 100) / 100);
+    Object.assign(invoice, require('../utils/salesReturnAmounts').balance(invoice));
 
     if (invoice.dueAmount <= 0.01) {
       invoice.paymentStatus = 'paid';
@@ -111,7 +115,7 @@ exports.addInvoicePayment = async (req, res) => {
     });
   } catch (error) {
     console.error('Add payment error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -131,6 +135,10 @@ exports.updateInvoiceItems = async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    if (await require('../models/SalesReturn').exists({ invoice: invoice._id, status: 'posted' })) {
+      return res.status(409).json({ success: false, message: 'Cancel the linked Credit Notes before changing or deleting this invoice.' });
+    }
+
 
     let proformaItems = [];
     if (invoice.leadId && invoice.proformaNumber) {
@@ -322,7 +330,7 @@ exports.updateInvoiceItems = async (req, res) => {
     });
   } catch (error) {
     console.error('Update invoice items error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -425,7 +433,7 @@ exports.createInvoice = async (req, res) => {
     });
   } catch (error) {
     console.error('Create invoice error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -468,7 +476,7 @@ exports.getInvoices = async (req, res) => {
     });
   } catch (error) {
     console.error('Get invoices error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -488,7 +496,7 @@ exports.getInvoice = async (req, res) => {
     res.json({ success: true, data: invoice });
   } catch (error) {
     console.error('Get invoice error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -503,6 +511,10 @@ exports.updateInvoiceStatus = async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    if (await require('../models/SalesReturn').exists({ invoice: invoice._id, status: 'posted' })) {
+      return res.status(409).json({ success: false, message: 'Cancel the linked Credit Notes before changing or deleting this invoice.' });
+    }
+
 
     invoice.status = status;
     if (status === 'paid' && paymentDate) {
@@ -516,7 +528,7 @@ exports.updateInvoiceStatus = async (req, res) => {
     res.json({ success: true, data: invoice });
   } catch (error) {
     console.error('Update invoice status error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -527,6 +539,10 @@ exports.deleteInvoice = async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    if (await require('../models/SalesReturn').exists({ invoice: invoice._id, status: 'posted' })) {
+      return res.status(409).json({ success: false, message: 'Cancel the linked Credit Notes before changing or deleting this invoice.' });
+    }
+
 
     // ⭐ Automatically clean up double-entry journal vouchers for this invoice
     const JournalEntry = require('../models/JournalEntry');
@@ -541,6 +557,6 @@ exports.deleteInvoice = async (req, res) => {
     res.json({ success: true, message: `✅ Invoice and associated journal vouchers deleted successfully` });
   } catch (error) {
     console.error('Delete invoice error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Server error' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 };

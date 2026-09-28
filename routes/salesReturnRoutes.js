@@ -1,0 +1,13 @@
+const router = require('express').Router();
+const { protect, restrictTo } = require('../middleware/auth');
+const controller = require('../controllers/salesReturnController');
+router.get('/shared/:token', controller.sharedPdf);
+router.use(protect, restrictTo('admin', 'accountant'));
+router.get('/source/:id', controller.getSource);
+router.get('/', controller.list);
+router.post('/', controller.create);
+router.post('/:id/cancel', controller.cancel);
+router.get('/:id/pdf', controller.pdf);
+router.post('/:id/share', controller.share);
+router.post('/:id/email', controller.email);
+module.exports = router;

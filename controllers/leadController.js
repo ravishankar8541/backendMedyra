@@ -470,7 +470,7 @@ exports.generateProforma = async (req, res) => {
       let productName = item.productName || 'Product';
       let hsCode = item.hsCode || '30049011';
       let unit = item.unit || 'Bottle';
-      let batchNumber = item.batch || '';
+      let batchNumber = ''; // Batch allocation happens at invoice conversion.
       let mfgDate = item.mfgDate || '';
       let expiryDate = item.expiryDate || '';
       let countryOfOrigin = item.countryOfOrigin || 'India';
@@ -774,7 +774,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       });
     }
 
-    if (proforma.convertedToInvoice && !force) {
+    if (proforma.convertedToInvoice) {
       return res.status(409).json({
         success: false,
         message: `⚠️ Proforma ${proforma.number} is already converted to invoice ${proforma.invoiceNumber}`
@@ -782,51 +782,18 @@ exports.convertProformaToInvoice = async (req, res) => {
     }
 
     const sourceItems = (customItems && customItems.length > 0) ? customItems : (proforma.items || []);
-
-    const itemsToDeduct = [];
-    for (const item of sourceItems) {
-      if (item.freight) continue;
-      const originalItem = (proforma.items || []).find(pi => 
-        (pi.productId && String(pi.productId) === String(item.productId)) || 
-        pi.productName === item.description
-      );
-
-      const maxAllowed = originalItem ? originalItem.quantity : item.quantity;
-      if (item.quantity > maxAllowed) {
-        return res.status(400).json({
-          success: false,
-          message: `⚠️ Quantity for "${item.description || item.productName}" cannot exceed proforma quantity (${maxAllowed}).`
-        });
-      }
-
-      itemsToDeduct.push({
-        productId: item.productId,
-        productName: item.description || item.productName,
-        quantity: parseInt(item.quantity) || 0,
-        batch: item.batch
-      });
+    const invoiceTaxType = req.body.taxType ?? proforma.taxType ?? 'cgst_sgst';
+    if (!['cgst_sgst', 'igst'].includes(invoiceTaxType)) {
+      return res.status(400).json({ success: false, message: 'Select CGST + SGST or IGST.' });
     }
-
-    const stockCheck = await checkStockAvailability(itemsToDeduct);
-    if (!stockCheck.ok) {
-      const details = stockCheck.shortages
-        .map((s) => `• ${s.productName} [Batch: ${s.batch}] — Required: ${s.required}, Available: ${s.available}`)
-        .join('\n');
-
-      return res.status(400).json({
-        success: false,
-        message: `⚠️ Insufficient stock in inventory:\n\n${details}`,
-        shortages: stockCheck.shortages
-      });
+    if (sourceItems.some(item => !Number.isFinite(Number(item.taxRate ?? 0)) || Number(item.taxRate ?? 0) < 0 || Number(item.taxRate ?? 0) > 100)) {
+      return res.status(400).json({ success: false, message: 'Enter a valid GST rate between 0 and 100.' });
     }
 
     try {
-      await deductStockForItems(itemsToDeduct);
-    } catch (stockErr) {
-      return res.status(400).json({
-        success: false,
-        message: `⚠️ Stock deduction failed: ${stockErr.message}`
-      });
+      await require('../utils/allocateSalesBatches')(sourceItems, proforma.items || [], Product);
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message });
     }
 
     const year = new Date().getFullYear();
@@ -899,6 +866,8 @@ exports.convertProformaToInvoice = async (req, res) => {
       }
 
       invoiceItems.push({
+        productId: item.productId,
+        stockBatchId: item.stockBatchId,
         description: item.description || item.productName || 'Product',
         quantity: qty,
         rate,
@@ -935,6 +904,7 @@ exports.convertProformaToInvoice = async (req, res) => {
 
     const invoiceData = {
       invoiceNumber,
+      taxType: invoiceTaxType,
       type: proforma.type || 'domestic',
       date: new Date().toISOString().split('T')[0],
       dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
@@ -1267,8 +1237,8 @@ exports.createProformaRevision = async (req, res) => {
         taxRate,
         total,
         totalValue: total,
-        batch: item.batch || '',
-        batchIndex: item.batchIndex ?? -1,
+        batch: '',
+        batchIndex: -1,
         hsCode: item.hsCode || '30049011',
         mfgDate: item.mfgDate || '',
         expiryDate: item.expiryDate || '',

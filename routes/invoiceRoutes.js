@@ -1,6 +1,7 @@
 // routes/invoiceRoutes.js
 const express = require('express');
 const router = express.Router();
+const transaction = require('../utils/receiptTransaction');
 const { body } = require('express-validator');
 const {
   createInvoice,
@@ -22,10 +23,10 @@ const invoiceValidation = [
 ];
 
 // Add Payment / Installment
-router.post('/:id/payments', protect, addInvoicePayment);
+router.post('/:id/payments', protect, transaction(addInvoicePayment));
 
 // Update Quantity / Items
-router.put('/:id/items', protect, updateInvoiceItems);
+router.put('/:id/items', protect, transaction(updateInvoiceItems));
 
 router.route('/')
   .post(protect, invoiceValidation, createInvoice)
@@ -33,9 +34,9 @@ router.route('/')
 
 router.route('/:id')
   .get(protect, getInvoice)
-  .put(protect, updateInvoiceItems)
-  .delete(protect, restrictTo('admin'), deleteInvoice);
+  .put(protect, transaction(updateInvoiceItems))
+  .delete(protect, restrictTo('admin'), transaction(deleteInvoice));
 
-router.put('/:id/status', protect, updateInvoiceStatus);
+router.put('/:id/status', protect, transaction(updateInvoiceStatus));
 
 module.exports = router;

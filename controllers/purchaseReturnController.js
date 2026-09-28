@@ -719,7 +719,22 @@ exports.getPurchaseReturn = async (req, res) => {
   try {
     const data = await PurchaseReturn.findById(objectId(req.params.id));
     if (!data) return res.status(404).json({ success: false, message: 'Return not found.' });
-    res.json({ success: true, data });
+    const result = data.toObject();
+    result.items = await Promise.all(result.items.map(async row => {
+      const grn = row.grnId ? await GoodsReceipt.findById(row.grnId) : null;
+      const source = grn?.items.find(item =>
+        (row.stockBatchId && idOf(item.stockBatchId) === idOf(row.stockBatchId)) ||
+        (row.invoiceItemId && idOf(item._id) === idOf(row.invoiceItemId)));
+      const product = row.stockBatchId ? await Product.findById(row.product) : null;
+      const lot = product?.batches.id(row.stockBatchId);
+      const original = source || lot;
+      return { ...row, originalBatch: original ? {
+        batchNumber: original.batchNumber,
+        mfgDate: original.mfgDate || '', expDate: original.expDate || '',
+        mrp: lot?.mrp ?? (source?.mrp != null ? money(Number(source.mrp) * (data.currency === 'INR' ? 1 : data.exchangeRate)) : row.mrp)
+      } : null };
+    }));
+    res.json({ success: true, data: result });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }
@@ -940,8 +955,13 @@ exports.getPublicDebitNoteView = async (req, res) => {
 </body>
 </html>`;
 
-    res.setHeader('Content-Type', 'text/html');
-    return res.send(html);
+    const pdf = require('../utils/debitNotePdf').buildDebitNotePdf(html, { currency, symbol: sym });
+    const filename = `Debit-Note-${doc.returnNumber}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${filename}.pdf"`);
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    return res.send(Buffer.from(pdf.output('arraybuffer')));
   } catch (err) {
     console.error('Public Debit Note View error:', err);
     return res

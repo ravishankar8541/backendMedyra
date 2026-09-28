@@ -57,6 +57,8 @@ test('purchase order email validation, SMTP outcomes and upload handling', async
     assert.match(sent.html, /&lt;hello&gt; &amp; thanks/);
     assert.equal(update[1].emailSent, true);
     assert.equal(transportOptions.secure, false);
+    assert.equal(transportOptions.pool, true);
+    assert.equal(transportOptions.maxConnections, 2);
     assert.equal(transportOptions.requireTLS, true);
     assert.notEqual(transportOptions.tls.rejectUnauthorized, false);
   });

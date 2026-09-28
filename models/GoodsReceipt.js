@@ -50,6 +50,7 @@ const PaymentSchema = new mongoose.Schema({
 }, { _id: true });
 
 const ConsolidatedInvoiceSchema = new mongoose.Schema({
+  paymentCorrections: [{ previousAmount: Number, correctedAmount: Number, reason: String, correctedBy: String, correctedAt: Date, previousPayments: [PaymentSchema], correctedPayments: [PaymentSchema] }],
   invoiceNumber: { type: String, required: true, unique: true },
   grnIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' }],
   poNumber: { type: String, required: true },

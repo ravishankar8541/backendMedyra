@@ -26,6 +26,7 @@ router.get('/dashboard', ctrl.getReceiptDashboard);
 
 // ========== INVOICE (PI) ROUTES (before /:id) ==========
 router.get('/invoices', ctrl.getConsolidatedInvoices);
+router.get('/invoices/:invoiceId/deletion-context', restrictTo('admin', 'manager'), ctrl.getInvoiceDeletionContext);
 router.get('/invoices/:invoiceId', ctrl.getConsolidatedInvoice);
 router.put(
   '/invoices/:invoiceId',

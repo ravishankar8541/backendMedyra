@@ -26,6 +26,8 @@ const InvoiceItemSchema = new mongoose.Schema({
     required: true
   },
   batch: String,
+  productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+  stockBatchId: mongoose.Schema.Types.ObjectId,
   hsCode: String,
   mfgDate: String,
   expiryDate: String,
@@ -148,6 +150,7 @@ const InvoiceSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  taxType: { type: String, enum: ['cgst_sgst', 'igst'], default: 'cgst_sgst' },
   tax: {
     type: Number,
     default: 0
@@ -208,6 +211,9 @@ const InvoiceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  returnCredit: { type: Number, default: 0 },
+  returnTax: { type: Number, default: 0 },
+  customerCredit: { type: Number, default: 0 },
   dueAmount: {
     type: Number,
     default: 0

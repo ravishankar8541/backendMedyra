@@ -17,6 +17,9 @@ function getTransport() {
   if (!transporter || key !== transportKey) {
     transporter?.close();
     transporter = nodemailer.createTransport({
+      pool: true,
+      maxConnections: 2,
+      maxMessages: 50,
       host, port, secure: port === 465,
       requireTLS: port !== 465,
       auth: { user, pass },

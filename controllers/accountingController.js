@@ -158,7 +158,7 @@ const syncAllAutomatedJournals = async () => {
           await JournalEntry.findByIdAndDelete(jv._id);
         }
       } else if (['purchase_invoice', 'payment_disbursement'].includes(jv.sourceModule)) {
-        if (!purchaseInvIds.has(srcId) && !purchaseInvNums.has(refNum)) {
+        if (srcId ? !purchaseInvIds.has(srcId) : !purchaseInvNums.has(refNum)) {
           await JournalEntry.findByIdAndDelete(jv._id);
         }
       }
@@ -866,7 +866,7 @@ exports.updateJournalEntry = async (req, res) => {
 
     const jv = await JournalEntry.findById(id);
     if (!jv) return res.status(404).json({ success: false, message: 'Journal voucher not found' });
-    if (jv.sourceModule === 'purchase_return') return res.status(400).json({ success: false, message: 'Cancel the purchase return to reverse this journal.' });
+    if (['purchase_return', 'sales_return'].includes(jv.sourceModule)) return res.status(400).json({ success: false, message: 'Cancel the linked return to reverse this journal.' });
 
     if (!lines || lines.length < 2) {
       return res.status(400).json({ success: false, message: 'Journal entry requires at least 2 lines (debit & credit).' });
@@ -927,7 +927,7 @@ exports.deleteJournalEntry = async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await JournalEntry.findById(id);
-    if (existing?.sourceModule === 'purchase_return') return res.status(400).json({ success: false, message: 'Cancel the purchase return to reverse this journal.' });
+    if (['purchase_return', 'sales_return'].includes(existing?.sourceModule)) return res.status(400).json({ success: false, message: 'Cancel the linked return to reverse this journal.' });
     const deleted = await JournalEntry.findByIdAndDelete(id);
     if (!deleted) {
       return res.status(404).json({ success: false, message: 'Journal voucher not found' });
@@ -1125,6 +1125,15 @@ exports.getProfitLoss = async (req, res) => {
       directMaterialsCOGS = procurementBills;
     }
 
+    // Apply returns in their posting period, including returns of older invoices.
+    journalExpenses.filter(je => je.sourceModule === 'sales_return').forEach(je => {
+      je.lines.forEach(line => {
+        const reversal = Number(line.debit || 0) - Number(line.credit || 0);
+        if (line.accountCode === '4000') domesticSales -= reversal;
+        if (line.accountCode === '4010') exportSales -= reversal;
+        if (line.accountCode === '5000') directMaterialsCOGS += reversal;
+      });
+    });
     let manualOperatingExpenses = 0;
     journalExpenses.forEach((je) => {
       je.lines.forEach((l) => {
@@ -1214,11 +1223,12 @@ exports.getBalanceSheet = async (req, res) => {
     const totalCurrentAssets = cashAndBank + accountsReceivable + inventoryValuation + supplierCredits;
     const totalAssets = totalCurrentAssets + Math.max(0, fixedAssetsValuation);
 
-    const totalOutputGst = invoices.reduce((sum, inv) => sum + (Number(inv.tax) || 0), 0);
+    const totalOutputGst = invoices.reduce((sum, inv) => sum + (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0), 0);
     const totalInputGst = purchases.reduce((sum, pi) => sum + (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0), 0);
     const outputGstPayable = Math.max(0, totalOutputGst - totalInputGst);
 
-    const totalCurrentLiabilities = accountsPayable + outputGstPayable;
+    const customerCredits = invoices.reduce((sum, inv) => sum + Number(inv.customerCredit || 0), 0);
+    const totalCurrentLiabilities = accountsPayable + outputGstPayable + customerCredits;
     const totalLiabilities = totalCurrentLiabilities;
 
     const ownersEquity = Math.max(0, capitalAmount);
@@ -1247,6 +1257,7 @@ exports.getBalanceSheet = async (req, res) => {
           currentLiabilities: {
             accountsPayable: Math.round(accountsPayable * 100) / 100,
             taxPayable: Math.round(outputGstPayable * 100) / 100,
+            customerCredits: Math.round(customerCredits * 100) / 100,
             totalCurrent: Math.round(totalCurrentLiabilities * 100) / 100
           },
           totalLiabilities: Math.round(totalLiabilities * 100) / 100
@@ -1283,11 +1294,11 @@ exports.getAccountingDashboard = async (req, res) => {
     let totalCustomerPaid = 0;
 
     invoices.forEach((inv) => {
-      totalRevenue += Number(inv.total) || 0;
+      totalRevenue += (Number(inv.total) || 0) - (Number(inv.returnCredit) || 0);
       totalReceivables += Number(inv.dueAmount) || 0;
       totalCustomerPaid += Number(inv.paidAmount) || 0;
       totalIncentivePaid += Number(inv.incentive) || 0;
-      totalTaxCollected += Number(inv.tax) || 0;
+      totalTaxCollected += (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0);
     });
 
     let totalPayables = 0;
@@ -1339,7 +1350,7 @@ exports.getTaxAndFinancialReports = async (req, res) => {
 
     let outputGst = 0, cgstOutput = 0, sgstOutput = 0, igstOutput = 0;
     invoices.forEach((inv) => {
-      const tax = Number(inv.tax) || 0;
+      const tax = (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0);
       outputGst += tax;
       const place = (inv.placeOfSupply || '').toLowerCase();
       if (place.includes('delhi') || place.includes('07') || inv.taxType === 'cgst_sgst') {
@@ -1413,3 +1424,5 @@ exports.getTaxAndFinancialReports = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+exports.getAccountMap = getAccountMap;

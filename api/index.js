@@ -130,6 +130,8 @@ mountRoute('/api/orders', orderRoutes, 'Order Routes');
 mountRoute('/api/inventory', inventoryRoutes, 'Inventory Routes');
 mountRoute('/api/suppliers', supplierRoutes, 'Supplier Routes');
 mountRoute('/api/purchase-orders', purchaseOrderRoutes, 'Purchase Order Routes');
+// Compact, unguessable public PDF links; legacy lead document URLs remain supported.
+app.get('/api/p/:token', require('../controllers/proformaShareController').view);
 mountRoute('/api/leads', leadRoutes, 'Lead Routes');
 mountRoute('/api/followups', followupRoutes, 'Followup Routes');
 mountRoute('/api/dashboard', dashboardRoutes, 'Dashboard Routes');
@@ -147,6 +149,7 @@ mountRoute('/api/units', unitRoutes, 'Unit Routes');
 mountRoute('/api/categories', categoryRoutes, 'Category Routes')
 mountRoute('/api/goods-receipts', goodsReceiptRoutes, 'Goods Receipt Routes');
 mountRoute('/api/purchase-returns', purchaseReturnRoutes, 'Purchase Return Routes');
+mountRoute('/api/sales-returns', require('../routes/salesReturnRoutes'), 'Sales Return Routes');
 mountRoute('/api/subcategories', subCategoryRoutes, 'Sub Category Routes');
 mountRoute('/api/vendor-price-lists', vendorPriceListRoutes, 'Vendor Price Lists');
 mountRoute('/api/client-price-lists', clientPriceListRoutes, 'Client Price Lists');

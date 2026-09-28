@@ -168,19 +168,33 @@ test('non-batch receiving, zero quantity correction and deletion stay consistent
   assert.equal((await Product.findById(product._id)).stock, 0);
   assert.equal((await PurchaseOrder.findById(po._id)).status, 'pending');
   assert.equal(await JournalEntry.countDocuments({ sourceId: grn.consolidatedInvoiceId, sourceModule: 'purchase_invoice' }), 0);
+  await ok(purchase.deletePurchaseOrder, {}, { id: po._id });
   await ok(receipt.deleteGRN, {}, { id: grn._id });
   assert.equal(await ConsolidatedInvoice.countDocuments({ purchaseOrder: po._id }), 0);
 });
 
-test('invoice reversal cannot subtract stock twice and allows a fresh receipt', async () => {
+test('invoice deletion requires PO deletion first and removes receipts, payments and stock once', async () => {
   const { product, po } = await setup(100);
-  const first = await ok(receipt.createGRN, input(po, 100, 'B1'));
-  await ok(receipt.deleteConsolidatedInvoice, {}, { invoiceId: first.consolidatedInvoiceId });
-  assert.equal((await Product.findById(product._id)).stock, 0);
-  assert.equal((await GoodsReceipt.findById(first._id)).status, 'cancelled');
-  await ok(receipt.deleteGRN, {}, { id: first._id });
-  await ok(receipt.createGRN, input(po, 100, 'B2'));
+  const first = await ok(receipt.createGRN, input(po, 100, 'B1', 0, { initialPayment: { amount: 100, method: 'cash' } }));
+  const context = await ok(receipt.getInvoiceDeletionContext, {}, { invoiceId: first.consolidatedInvoiceId });
+  assert.equal(String(context.purchaseOrder._id), String(po._id));
+  const blocked = await call(receipt.deleteConsolidatedInvoice, {}, { invoiceId: first.consolidatedInvoiceId });
+  assert.equal(blocked.status, 400);
+  assert.match(blocked.message, /Purchase Order/);
   assert.equal((await Product.findById(product._id)).stock, 100);
+  await ok(purchase.deletePurchaseOrder, {}, { id: po._id });
+  assert.equal((await Product.findById(product._id)).stock, 100);
+  assert.ok(await ConsolidatedInvoice.findById(first.consolidatedInvoiceId));
+  assert.equal((await ok(receipt.getInvoiceDeletionContext, {}, { invoiceId: first.consolidatedInvoiceId })).purchaseOrder, null);
+  await ok(receipt.deleteConsolidatedInvoice, {}, { invoiceId: first.consolidatedInvoiceId });
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.stock, 0);
+  assert.equal(stock.batches.length, 0);
+  assert.equal(stock.stockMovements.length, 0);
+  assert.equal(await GoodsReceipt.findById(first._id), null);
+  assert.equal(await ConsolidatedInvoice.findById(first.consolidatedInvoiceId), null);
+  assert.equal(await JournalEntry.countDocuments({ sourceId: first.consolidatedInvoiceId }), 0);
+  assert.equal((await call(receipt.deleteConsolidatedInvoice, {}, { invoiceId: first.consolidatedInvoiceId })).status, 404);
 });
 
 test('invoice corrections preserve stock identity and update receipt stock', async () => {
@@ -211,7 +225,7 @@ test('purchase editing preserves line IDs and received quantities', async () => 
   assert.equal(order.items[0].receivedQty, 50);
   assert.equal(order.items[0].remainingQty, 70);
   const result = await call(purchase.deletePurchaseOrder, {}, { id: po._id });
-  assert.equal(result.status, 400);
+  assert.equal(result.status, 200);
 });
 
 test('concurrent retry of the same receipt adds stock only once', async () => {
@@ -336,7 +350,7 @@ test('purchase return reduces exact stock lot and dues, retries once, and cancel
   assert.equal((await call(receipt.deleteConsolidatedInvoice, {}, { invoiceId: invoice._id })).success, false);
   await syncAllAutomatedJournals();
   assert.equal(await JournalEntry.countDocuments({ sourceModule: 'purchase_return', sourceId: posted._id }), 1);
-  assert.equal((await call(receipt.updateConsolidatedInvoice, { items: invoice.items.map(i => i.toObject()) }, { invoiceId: invoice._id })).success, false);
+  assert.equal((await call(receipt.updateConsolidatedInvoice, { items: invoice.items.map(i => i.toObject()) }, { invoiceId: invoice._id })).success, true); // An unchanged edit is valid with linked returns.
   assert.equal((await call(receipt.deleteGRN, {}, { id: grn._id })).success, false);
   const src = await ok(returns.getReturnSource, {}, { invoiceId: invoice._id });
   assert.equal(src.items[0].returnedQty, 20);
@@ -512,4 +526,132 @@ test('non-batch replacement records MRP in stock movement', async () => {
   const stock = await Product.findById(product._id);
   assert.equal(stock.stock, 10);
   assert.equal(stock.stockMovements.at(-1).mrp, 80);
+});
+
+for (const cancel of [false, true]) test(`invoice cascade reverses returns and different replacement batches (cancelled=${cancel})`, async () => {
+  const { product, po } = await setup(100);
+  const grn = await ok(receipt.createGRN, input(po, 100, 'CASCADE', 0, { initialPayment: { amount: 100, method: 'cash' } }));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const posted = await ok(returns.createPurchaseReturn, returnInput(invoice, 20));
+  await ok(returns.receiveReplacement, { items: [{ itemId: posted.items[0]._id, quantity: 10, batchNumber: 'REPLACEMENT', mrp: 80 }] }, { id: posted._id });
+  if (cancel) await ok(returns.cancelPurchaseReturn, {}, { id: posted._id });
+  await ok(purchase.deletePurchaseOrder, {}, { id: po._id });
+  await ok(receipt.deleteConsolidatedInvoice, {}, { invoiceId: invoice._id });
+  assert.equal((await Product.findById(product._id)).stock, 0);
+  assert.equal(await PurchaseReturn.findById(posted._id), null);
+  assert.equal(await JournalEntry.countDocuments({ sourceId: { $in: [invoice._id, posted._id] } }), 0);
+});
+
+test('failed cascade rolls back return, stock, invoice, receipt and payment changes', async () => {
+  const { product, po } = await setup(100);
+  const grn = await ok(receipt.createGRN, input(po, 100, 'ROLLBACK', 0, { initialPayment: { amount: 100, method: 'cash' } }));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const posted = await ok(returns.createPurchaseReturn, returnInput(invoice, 20));
+  const stock = await Product.findById(product._id);
+  stock.batches[0].quantity = 70;
+  await stock.save();
+  await ok(purchase.deletePurchaseOrder, {}, { id: po._id });
+  const count = await JournalEntry.countDocuments({ sourceId: invoice._id });
+  const result = await call(receipt.deleteConsolidatedInvoice, {}, { invoiceId: invoice._id });
+  assert.equal(result.status, 400);
+  assert.match(result.message, /sold or reserved/);
+  assert.equal((await Product.findById(product._id)).stock, 70);
+  assert.ok(await PurchaseReturn.findById(posted._id));
+  assert.ok(await GoodsReceipt.findById(grn._id));
+  assert.equal((await ConsolidatedInvoice.findById(invoice._id)).paidAmount, 100);
+  assert.equal(await JournalEntry.countDocuments({ sourceId: invoice._id }), count);
+});
+
+test('failure after stock saves and receipt deletion rolls back the entire cascade', async () => {
+  const { product, po } = await setup(10);
+  const grn = await ok(receipt.createGRN, input(po, 10, 'ATOMIC'));
+  await ok(purchase.deletePurchaseOrder, {}, { id: po._id });
+  const original = ConsolidatedInvoice.prototype.deleteOne;
+  let result;
+  try {
+    ConsolidatedInvoice.prototype.deleteOne = async function () { throw new Error('Simulated final delete failure'); };
+    result = await call(receipt.deleteConsolidatedInvoice, {}, { invoiceId: grn.consolidatedInvoiceId });
+  } finally { ConsolidatedInvoice.prototype.deleteOne = original; }
+  assert.equal(result.status, 500);
+  assert.equal((await Product.findById(product._id)).stock, 10);
+  assert.ok(await GoodsReceipt.findById(grn._id));
+  assert.ok(await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId));
+  assert.ok(await JournalEntry.exists({ sourceId: grn.consolidatedInvoiceId }));
+});
+
+for (const sold of [false, true]) test(`orphan GRN recovery includes deleted returns and replacement batches, sold=${sold}`, async () => {
+  const { product, po } = await setup(10);
+  const grn = await ok(receipt.createGRN, input(po, 9, 'ORPHAN', 0, { initialPayment: { amount: 100, method: 'cash' } }));
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const returned = await ok(returns.createPurchaseReturn, returnInput(invoice, 4));
+  await ok(returns.receiveReplacement, { items: [{ itemId: returned.items[0]._id, quantity: 4, batchNumber: 'ORPHAN-REPLACEMENT', mrp: 80 }] }, { id: returned._id });
+  await ok(receipt.createGRN, input(po, 1, 'ORPHAN', 9));
+  // Simulate historical document-only deletion, keeping receipt-owned movements.
+  await ConsolidatedInvoice.deleteOne({ _id: invoice._id });
+  await PurchaseReturn.deleteOne({ _id: returned._id });
+  await PurchaseOrder.deleteOne({ _id: po._id });
+  if (sold) {
+    const stock = await Product.findById(product._id);
+    stock.batches.find(lot => lot.batchNumber === 'ORPHAN-REPLACEMENT').quantity = 3;
+    await stock.save();
+  }
+  const result = await call(receipt.deleteGRN, {}, { id: grn._id });
+  assert.equal(result.status, sold ? 400 : 200, JSON.stringify(result));
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.stock, sold ? 9 : 0);
+  assert.equal(Boolean(await GoodsReceipt.findById(grn._id)), sold);
+  if (!sold) {
+    assert.equal(stock.stockMovements.length, 0);
+    assert.equal(stock.batches.length, 0);
+    assert.equal(await JournalEntry.countDocuments({ sourceId: invoice._id }), 0);
+    assert.equal(await JournalEntry.countDocuments({ sourceId: returned._id }), 0);
+    assert.equal((await call(receipt.deleteGRN, {}, { id: grn._id })).status, 404);
+  }
+});
+
+test('paid amount corrections preserve audit, GRN payment identity and accounting balances', async () => {
+  const { po } = await setup(10);
+  const grn = await ok(receipt.createGRN, input(po, 5, 'PAY-CORRECT', 0, { initialPayment: { amount: 100, method: 'cash' } }));
+  const id = grn.consolidatedInvoiceId;
+  const correct = (paidAmount, expectedPaidAmount) => ({ paidAmount, expectedPaidAmount, paymentCorrectionReason: 'Entry correction', paymentMethod: 'bank', paymentDate: '2026-09-28' });
+  let inv = await ok(receipt.updateConsolidatedInvoice, correct(200, 100), { invoiceId: id });
+  assert.equal(inv.paidAmount, 200);
+  assert.equal(inv.payments.length, 2);
+  assert.equal(inv.paymentCorrections.length, 1);
+  assert.equal((await GoodsReceipt.findById(grn._id)).paidAmount, 200);
+  assert.deepEqual((await GoodsReceipt.findById(grn._id)).payments.map(p => String(p._id)), inv.payments.map(p => String(p._id)));
+  assert.equal(await JournalEntry.countDocuments({ sourceId: id, sourceModule: 'payment_disbursement' }), 2);
+  inv = await ok(receipt.updateConsolidatedInvoice, correct(50, 200), { invoiceId: id });
+  assert.equal(inv.payments.length, 1);
+  assert.equal(inv.payments[0].method, 'cash');
+  assert.equal(inv.payments[0].amount, 50);
+  assert.equal(inv.paymentCorrections[1].previousPayments.length, 2);
+  assert.equal(await JournalEntry.countDocuments({ sourceId: id, sourceModule: 'payment_disbursement' }), 1);
+  assert.equal((await JournalEntry.findOne({ sourceId: id, sourceModule: 'payment_disbursement' })).totalDebit, 50);
+  assert.equal((await call(receipt.updateConsolidatedInvoice, correct(75, 200), { invoiceId: id })).status, 400);
+  assert.equal((await call(receipt.updateConsolidatedInvoice, correct(-1, 50), { invoiceId: id })).status, 400);
+  inv = await ok(receipt.updateConsolidatedInvoice, correct(0, 50), { invoiceId: id });
+  assert.equal(inv.paidAmount, 0);
+  assert.equal(inv.paymentStatus, 'pending');
+  assert.equal(inv.payments.length, 0);
+  assert.equal(await JournalEntry.countDocuments({ sourceId: id, sourceModule: 'payment_disbursement' }), 0);
+  await ok(receipt.createGRN, input(po, 5, 'PAY-CORRECT-2', 5));
+  assert.equal((await ConsolidatedInvoice.findById(id)).paidAmount, 0);
+});
+
+test('replacement form resolves original GRN dates even after its stock lot disappears', async () => {
+  const { product, po } = await setup(10);
+  const body = input(po, 10, 'AUTO-DATES');
+  Object.assign(body.items[0], { mfgDate: '2026-01-01', expDate: '2028-01-01' });
+  const grn = await ok(receipt.createGRN, body);
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const returned = await ok(returns.createPurchaseReturn, returnInput(invoice, 10));
+  const details = await ok(returns.getPurchaseReturn, {}, { id: returned._id });
+  assert.equal(details.items[0].originalBatch.mfgDate, '2026-01-01');
+  assert.equal(details.items[0].originalBatch.expDate, '2028-01-01');
+  assert.equal(details.items[0].originalBatch.mrp, 80);
+  await Product.updateOne({ _id: product._id }, { $set: { batches: [] } });
+  const legacy = await ok(returns.getPurchaseReturn, {}, { id: returned._id });
+  assert.equal(legacy.items[0].originalBatch.batchNumber, 'AUTO-DATES');
+  assert.equal(legacy.items[0].originalBatch.expDate, '2028-01-01');
 });

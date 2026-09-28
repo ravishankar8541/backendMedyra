@@ -469,8 +469,15 @@ exports.getPublicInvoiceView = async (req, res) => {
 </body>
 </html>`;
 
-    res.setHeader('Content-Type', 'text/html');
-    return res.send(html);
+    const pdf = require('../utils/purchaseInvoicePdf').buildPurchaseInvoicePdf(html, {
+      currency, symbol, logo: require('../utils/documentLogo')
+    });
+    const filename = `Purchase-Invoice-${invoice.invoiceNumber}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${filename}.pdf"`);
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    return res.send(Buffer.from(pdf.output('arraybuffer')));
   } catch (err) {
     console.error('Public Invoice View error:', err);
     return res
@@ -1245,6 +1252,12 @@ exports.updateConsolidatedInvoice = async (req, res) => {
       ? 0
       : Number((invoice.grandTotal - exactTotal).toFixed(2));
 
+    const paymentCorrected = require('../utils/correctInvoicePayment')(invoice, req.body, req.user?.name || 'System');
+    if (paymentCorrected) {
+      const linkedReceipts = await GoodsReceipt.find({ $or: [{ _id: { $in: invoice.grnIds || [] } }, { invoiceId: invoice._id }, { consolidatedInvoiceId: invoice._id }] });
+      if (linkedReceipts.length > 1) fail('This invoice combines multiple receipts. Correct its receipt-level payments individually.');
+      await JournalEntry.deleteMany({ sourceModule: 'payment_disbursement', sourceId: invoice._id });
+    }
     const returnCredit = Number(invoice.returnCredit || 0);
     const paidAmt = Number(invoice.paidAmount) || 0;
     invoice.remainingAmount = Math.max(0, invoice.grandTotal - returnCredit - paidAmt);
@@ -1262,6 +1275,10 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 
     // Mirror synced totals back to the GRN
     if (grn) {
+      if (paymentCorrected) {
+        grn.payments = invoice.payments.map(plain);
+        grn.paidAmount = invoice.paidAmount;
+      }
       grn.subtotal = invoice.subtotal;
       grn.totalTax = invoice.totalTax;
       grn.chargesSubtotal = invoice.chargesSubtotal;
@@ -1293,6 +1310,23 @@ exports.updateConsolidatedInvoice = async (req, res) => {
 // ============================================
 // DELETE PURCHASE INVOICE
 // ============================================
+exports.getInvoiceDeletionContext = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.invoiceId)) return res.status(400).json({ success: false, message: 'Valid Invoice ID is required' });
+    const invoice = await ConsolidatedInvoice.findById(req.params.invoiceId);
+    if (!invoice) return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
+    const receipts = await GoodsReceipt.find({ $or: [
+      { _id: { $in: [...(invoice.grnIds || []), ...(invoice.grnId ? [invoice.grnId] : [])] } },
+      { consolidatedInvoiceId: invoice._id }, { invoiceId: invoice._id }
+    ] }).select('purchaseOrder');
+    const purchaseOrder = await PurchaseOrder.findOne({ _id: { $in: [invoice.purchaseOrder, ...receipts.map(row => row.purchaseOrder)].filter(Boolean) } })
+      .select('poNumber supplierName total currency');
+    return res.json({ success: true, data: { purchaseOrder } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.deleteConsolidatedInvoice = async (req, res) => {
   try {
     const invoiceId =
@@ -1300,7 +1334,7 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
       req.params.id ||
       req.query.invoiceId ||
       req.query.id ||
-      req.body.invoiceId;
+      req.body?.invoiceId;
     if (!invoiceId || !mongoose.isValidObjectId(invoiceId)) {
       return res.status(400).json({ success: false, message: 'Valid Invoice ID is required' });
     }
@@ -1310,30 +1344,12 @@ exports.deleteConsolidatedInvoice = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Purchase Invoice not found' });
     }
 
-    await JournalEntry.deleteMany({
-      $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }]
-    });
-
-    const grnIds = invoice.grnIds || (invoice.grnId ? [invoice.grnId] : []);
-    if ((!grnIds || grnIds.length === 0) && invoice._id) {
-      const linked = await GoodsReceipt.find({ consolidatedInvoiceId: invoice._id }).select('_id');
-      linked.forEach((g) => grnIds.push(g._id));
-    }
-
-    for (const grnId of grnIds) {
-      const grn = await GoodsReceipt.findById(grnId);
-      if (grn) await reverseReceipt(grn, req.user?.name || 'System');
-    }
-
-    if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) {
-      fail('Cancel linked purchase returns before deleting this invoice.');
-    }
-    await invoice.deleteOne();
+    await require('../utils/deletePurchaseInvoice')(invoice, req.user?.name || 'System');
 
     return res.json({
       success: true,
       message:
-        'Purchase Invoice and corresponding double-entry accounting journals deleted successfully. Stock reversed.'
+        'Purchase invoice and related entries deleted. Stock reversed.'
     });
   } catch (error) {
     console.error('❌ Delete Invoice error:', error);
@@ -1648,28 +1664,18 @@ exports.deleteGRN = async (req, res) => {
     const grn = await GoodsReceipt.findById(req.params.id);
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });
 
-    await JournalEntry.deleteMany({
-      $or: [{ sourceId: grn._id }, { referenceNumber: grn.grnNumber }]
-    });
-
-    const invoiceId = grn.consolidatedInvoiceId || grn.invoiceId;
-    if (invoiceId) {
-      const invoice = await ConsolidatedInvoice.findById(invoiceId);
-      if (invoice && invoice.grnIds.some((id) => idOf(id) !== idOf(grn._id))) {
-        fail(
-          'This legacy invoice links multiple GRNs. Reverse it from Purchase Invoices to keep accounting consistent.'
-        );
-      }
-      if (invoice) {
-        await JournalEntry.deleteMany({
-          $or: [{ sourceId: invoice._id }, { referenceNumber: invoice.invoiceNumber }]
-        });
-        if (await PurchaseReturn.exists({ invoice: invoice._id, status: 'completed' })) {
-          fail('Cancel linked purchase returns before deleting this invoice.');
-        }
-        await invoice.deleteOne();
-      }
+    const invoice = await ConsolidatedInvoice.findOne({ $or: [
+      { _id: { $in: [grn.consolidatedInvoiceId, grn.invoiceId].filter(Boolean) } },
+      { grnIds: grn._id }, { grnId: grn._id }
+    ] });
+    if (invoice) {
+      await require('../utils/deletePurchaseInvoice')(invoice, req.user?.name || 'System');
+      return res.json({ success: true, message: 'Invoice and related entries deleted. Stock reversed.' });
     }
+    if (await require('../utils/deleteOrphanReceipt')(grn, req.user?.name || 'System')) {
+      return res.json({ success: true, message: 'Leftover receipts and payments removed. Original and replacement stock reconciled from receipt history.' });
+    }
+    await JournalEntry.deleteMany({ sourceId: grn._id, sourceModule: { $in: ['purchase_invoice', 'payment_disbursement'] } });
     await reverseReceipt(grn, req.user?.name || 'System');
 
     await grn.deleteOne();
