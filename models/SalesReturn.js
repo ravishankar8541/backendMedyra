@@ -20,9 +20,20 @@ const schema = new mongoose.Schema({
     stockBatchId: mongoose.Schema.Types.ObjectId,
     productName: String, batchNumber: String, unit: String, hsn: String,
     mfgDate: String, expiryDate: String,
+    replacedQty: { type: Number, default: 0 },
     quantity: Number, unitPrice: Number, taxRate: Number,
     subtotal: Number, tax: Number, total: Number, costPrice: Number,
     restock: { type: Boolean, default: true }
+  }],
+  replacementStatus: { type: String, enum: ['pending', 'partial', 'sent'], default: 'pending' },
+  replacementCredit: { type: Number, default: 0 },
+  replacementTax: { type: Number, default: 0 },
+  replacementHistory: [{
+    requestId: String, requestHash: String, sentDate: String, sentBy: String, notes: String,
+    creditUsed: Number,
+    items: [{ returnItemId: mongoose.Schema.Types.ObjectId, product: mongoose.Schema.Types.ObjectId,
+      productName: String, stockBatchId: mongoose.Schema.Types.ObjectId, batchNumber: String,
+      mfgDate: String, expiryDate: String, quantity: Number, unit: String, costPrice: Number }]
   }],
   subtotal: Number, totalTax: Number, roundOff: Number, total: Number,
   status: { type: String, enum: ['posted', 'cancelled'], default: 'posted' },

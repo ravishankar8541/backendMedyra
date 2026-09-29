@@ -14,6 +14,17 @@ const {
 } = require('../controllers/invoiceController');
 const { protect, restrictTo } = require('../middleware/auth');
 
+const invoiceShare = require('../controllers/invoiceShareController');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 5, fieldSize: 64 * 1024 } }).single('pdf');
+const invoiceUpload = (req, res, next) => upload(req, res, error => {
+  if (!error) return next();
+  res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ success: false, message: 'Attach one invoice PDF up to 10 MB with its sharing details.' });
+});
+router.get('/document/:token', invoiceShare.view);
+router.post('/:id/share', protect, invoiceUpload, invoiceShare.share);
+router.post('/:id/email', protect, invoiceUpload, invoiceShare.email);
+
 const invoiceValidation = [
   body('customer.name').notEmpty().withMessage('Customer name required'),
   body('customer.address').notEmpty().withMessage('Customer address required'),

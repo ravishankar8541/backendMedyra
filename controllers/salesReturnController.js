@@ -61,10 +61,11 @@ async function moveStock(invoice, note, direction, user) {
     await product.save();
   }
 }
-async function postJournal(invoice, note) {
+async function postJournal(invoice, note, reverse = false) {
   const accounts = await require('./accountingController').getAccountMap();
   const entries = [];
   const add = (code, debit, credit) => {
+    if (reverse) [debit, credit] = [credit, debit];
     if (!debit && !credit) return;
     const account = accounts.get(code);
     entries.push({ account: account._id, accountCode: code, accountName: account.name, debit: round(debit), credit: round(credit),
@@ -91,8 +92,8 @@ async function postJournal(invoice, note) {
 }
 async function refreshBalance(invoice) {
   const notes = await SalesReturn.find({ invoice: invoice._id, status: 'posted' });
-  Object.assign(invoice, balance(invoice, notes.reduce((sum, n) => sum + n.total, 0)));
-  invoice.returnTax = round(notes.reduce((sum, n) => sum + n.totalTax, 0));
+  Object.assign(invoice, balance(invoice, notes.reduce((sum, n) => sum + n.total - Number(n.replacementCredit || 0), 0)));
+  invoice.returnTax = round(notes.reduce((sum, n) => sum + n.totalTax - Number(n.replacementTax || 0), 0));
   invoice.paymentStatus = invoice.dueAmount <= 0.01 ? 'paid' : invoice.paidAmount > 0 ? 'partially_paid' : 'unpaid';
   // A settled credit is not a cash payment. Keep the invoice's document status.
   await invoice.save();
@@ -188,6 +189,7 @@ exports.cancel = transaction(async (req, res) => {
   const note = await SalesReturn.findById(req.params.id);
   if (!note) fail('Credit note not found.', 404);
   if (note.status === 'cancelled') return res.json({ success: true, data: note });
+  if (note.replacementHistory?.length) fail('Cannot cancel a credit note after replacements have been sent.', 409);
   if (!String(req.body.reason || '').trim()) fail('Cancellation reason is required.');
   const invoice = await Invoice.findById(note.invoice);
   if (!invoice) fail('Original invoice not found.');
@@ -198,4 +200,96 @@ exports.cancel = transaction(async (req, res) => {
   await JournalEntry.updateMany({ sourceModule: 'sales_return', sourceId: note._id }, { $set: { status: 'void' } });
   await refreshBalance(invoice);
   res.json({ success: true, data: note });
+});
+
+// Replacement shipments consume existing credit and inventory in one transaction.
+exports.replacementSource = async (req, res) => {
+  try {
+    if (!validId(req.params.id)) fail('Invalid credit note.');
+    const note = await SalesReturn.findById(req.params.id);
+    if (!note || note.status !== 'posted') fail('Only posted credit notes can send replacements.');
+    const invoice = await Invoice.findById(note.invoice);
+    if (!invoice) fail('Original invoice not found.', 404);
+    const items = [];
+    for (const item of note.items) {
+      const remaining = item.quantity - Number(item.replacedQty || 0);
+      if (remaining <= 0) continue;
+      const product = await resolveProduct(invoice, item);
+      if (!product) fail(`Product ${item.productName} no longer exists.`);
+      items.push({ itemId: item._id, productName: item.productName, unit: item.unit,
+        quantity: item.quantity, replacedQty: item.replacedQty || 0, remaining,
+        productType: product.productType, available: Math.max(0, product.stock - (product.reservedStock || 0)),
+        batches: product.batches.map(b => ({ _id: b._id, batchNumber: b.batchNumber, mfgDate: b.mfgDate,
+          expiryDate: b.expDate, mrp: b.mrp, available: Math.max(0, b.quantity - (b.reservedQuantity || 0)) })) });
+    }
+    res.json({ success: true, data: { note, items } });
+  } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
+};
+exports.sendReplacement = transaction(async (req, res) => {
+  if (!validId(req.params.id)) fail('Invalid credit note.');
+  const { requestId, sentDate, notes = '', items } = req.body;
+  if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 100) fail('Replacement request ID is required.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sentDate || '') || !Number.isFinite(Date.parse(sentDate)) || new Date(sentDate).toISOString().slice(0, 10) !== sentDate) fail('Choose a valid shipment date.');
+  if (typeof notes !== 'string' || notes.length > 2000) fail('Notes must be text up to 2000 characters.');
+  if (!Array.isArray(items) || !items.length) fail('Enter at least one replacement quantity.');
+  const note = await SalesReturn.findById(req.params.id);
+  if (!note || note.status !== 'posted') fail('Only posted credit notes can send replacements.');
+  const hash = createHash('sha256').update(JSON.stringify({ sentDate, notes, items })).digest('hex');
+  const previous = note.replacementHistory.find(h => h.requestId === requestId);
+  if (previous) {
+    if (previous.requestHash !== hash) fail('This request was already used with different replacement details.', 409);
+    return res.json({ success: true, data: note, message: 'Replacement already recorded.' });
+  }
+  if (sentDate < note.returnDate.slice(0, 10)) fail('Shipment date cannot be before the return date.');
+  const invoice = await Invoice.findById(note.invoice);
+  if (!invoice || invoice.status === 'cancelled') fail('Original invoice is unavailable.');
+  const seen = new Set(), shipped = [];
+  let subtotal = 0, tax = 0;
+  for (const input of items) {
+    const id = String(input.itemId);
+    if (seen.has(id)) fail('Each return item can appear only once per shipment.');
+    seen.add(id);
+    const item = note.items.id(id);
+    if (!item) fail('Unknown return item.');
+    const quantity = Number(input.quantity), replaced = Number(item.replacedQty || 0);
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > item.quantity - replaced) fail(`Replacement quantity exceeds pending units for ${item.productName}.`);
+    const product = await resolveProduct(invoice, item);
+    if (!product) fail(`Product ${item.productName} no longer exists.`);
+    let lot;
+    if (product.productType !== 'non-batch') {
+      if (!validId(input.stockBatchId)) fail(`Select an inventory batch for ${item.productName}.`);
+      lot = product.batches.id(input.stockBatchId);
+      if (!lot) fail(`Selected batch does not belong to ${item.productName}.`);
+      const currentDate = new Date().toISOString().slice(0, 10);
+      if (lot.expDate && lot.expDate.slice(0, 10) < (sentDate > currentDate ? sentDate : currentDate)) fail(`Cannot send expired batch ${lot.batchNumber}.`);
+      if (lot.quantity - (lot.reservedQuantity || 0) < quantity) fail(`Insufficient available stock for ${item.productName} (${lot.batchNumber}).`);
+      lot.quantity -= quantity;
+    } else {
+      if (product.stock - (product.reservedStock || 0) < quantity) fail(`Insufficient available stock for ${item.productName}.`);
+      product.stock -= quantity;
+    }
+    const costPrice = Number(lot?.costPrice ?? product.pricing?.costPrice ?? item.costPrice ?? 0);
+    product.stockMovements.push({ type: 'remove', quantity, batchNumber: lot?.batchNumber || '', costPrice,
+      addedBy: req.user?.name || 'System', date: new Date(sentDate), reason: `Sales replacement sent for ${note.returnNumber}` });
+    await product.save();
+    item.product = product._id;
+    item.replacedQty = replaced + quantity;
+    subtotal = round(subtotal + round(item.subtotal * item.replacedQty / item.quantity) - round(item.subtotal * replaced / item.quantity));
+    tax = round(tax + round(item.tax * item.replacedQty / item.quantity) - round(item.tax * replaced / item.quantity));
+    shipped.push({ returnItemId: item._id, product: product._id, productName: item.productName, stockBatchId: lot?._id,
+      batchNumber: lot?.batchNumber || '', mfgDate: lot?.mfgDate || '', expiryDate: lot?.expDate || '', quantity, unit: item.unit, costPrice });
+  }
+  const complete = note.items.every(i => Number(i.replacedQty || 0) === i.quantity);
+  const roundOff = complete ? Number(note.roundOff || 0) : 0;
+  const creditUsed = round(subtotal + tax + roundOff);
+  note.replacementCredit = round(Number(note.replacementCredit || 0) + creditUsed);
+  note.replacementTax = round(Number(note.replacementTax || 0) + tax);
+  note.replacementStatus = complete ? 'sent' : 'partial';
+  note.replacementHistory.push({ requestId, requestHash: hash, sentDate, sentBy: req.user?.name || 'System', notes, creditUsed, items: shipped });
+  await note.save();
+  await postJournal(invoice, { ...note.toObject(), returnNumber: `${note.returnNumber}-REP-${note.replacementHistory.length}`,
+    returnDate: sentDate, createdBy: req.user?._id || req.user?.id, subtotal, totalTax: tax, total: creditUsed, roundOff,
+    items: shipped.map(i => ({ ...i, restock: true })) }, true);
+  await refreshBalance(invoice);
+  res.json({ success: true, data: note, message: `Replacement sent. Stock reduced; ${note.currency} ${creditUsed.toFixed(2)} credit applied.` });
 });

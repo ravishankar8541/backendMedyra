@@ -6,6 +6,8 @@ router.use(protect, restrictTo('admin', 'accountant'));
 router.get('/source/:id', controller.getSource);
 router.get('/', controller.list);
 router.post('/', controller.create);
+router.get('/:id/replacement-source', controller.replacementSource);
+router.post('/:id/replacement', controller.sendReplacement);
 router.post('/:id/cancel', controller.cancel);
 router.get('/:id/pdf', controller.pdf);
 router.post('/:id/share', controller.share);
