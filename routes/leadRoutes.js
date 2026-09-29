@@ -40,6 +40,7 @@ router.post('/:id/proforma-share', restrictTo('admin', 'manager', 'telecaller', 
 router.post('/:id/proforma-email', restrictTo('admin', 'manager', 'telecaller', 'staff'), proformaUpload, proformaShare.email);
 
 router.get('/stats', getLeadStats);
+router.get('/:id/ledger', restrictTo('admin', 'manager', 'telecaller', 'staff'), require('../controllers/clientLedgerController').getClientLedger);
 
 router.route('/')
   .post(leadValidation, createLead)

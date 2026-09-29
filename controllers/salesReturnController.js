@@ -1,4 +1,4 @@
-const { randomUUID, createHash } = require('node:crypto');
+const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const mongoose = require('mongoose');
 const SalesReturn = require('../models/SalesReturn');
 const Invoice = require('../models/Invoice');
@@ -128,6 +128,7 @@ exports.create = transaction(async (req, res) => {
   let amounts;
   try { amounts = lines(invoice, previous, items); } catch (e) { fail(e.message); }
   const note = new SalesReturn({ ...amounts, invoice: invoice._id, invoiceNumber: invoice.invoiceNumber,
+    invoiceDate: invoice.date, placeOfSupply: invoice.placeOfSupply,
     requestId, requestHash: hash, returnNumber: `CN-${new Date().getFullYear()}/${randomUUID().slice(0, 8).toUpperCase()}`,
     customerId: invoice.leadId, customer: invoice.customer.toObject(), company: invoice.company?.toObject(),
     currency: invoice.currency || 'INR', exchangeRate: invoice.exchangeRate || 1, taxType: invoice.taxType || 'igst',
@@ -140,6 +141,16 @@ exports.create = transaction(async (req, res) => {
 });
 
 const pdfBuffer = require('../utils/creditNotePdf');
+// Older credit notes predate these display snapshots. Read only missing metadata.
+const documentNote = async note => {
+  const data = note.toObject ? note.toObject() : { ...note };
+  if (!data.invoiceDate || !data.placeOfSupply) {
+    const invoice = await Invoice.findById(data.invoice).select('date placeOfSupply').lean();
+    data.invoiceDate ||= invoice?.date;
+    data.placeOfSupply ||= invoice?.placeOfSupply;
+  }
+  return data;
+};
 const sendPdf = (res, note) => res.set({ 'Content-Type': 'application/pdf',
   'Content-Disposition': `inline; filename="${note.returnNumber.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf"`,
   'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).send(pdfBuffer(note));
@@ -148,38 +159,44 @@ exports.pdf = async (req, res) => {
     if (!validId(req.params.id)) fail('Invalid credit note.');
     const note = await SalesReturn.findById(req.params.id);
     if (!note) fail('Credit note not found.', 404);
-    sendPdf(res, note);
+    sendPdf(res, await documentNote(note));
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
 exports.share = async (req, res) => {
   try {
     if (!validId(req.params.id)) fail('Invalid credit note.');
-    const note = await SalesReturn.findById(req.params.id).select('+shareToken');
+    const note = await SalesReturn.findById(req.params.id).select('+shareToken +shortShareToken');
     if (!note || note.status !== 'posted') fail('Only posted credit notes can be shared.');
-    if (!note.shareToken) { note.shareToken = randomUUID() + randomUUID(); await note.save(); }
-    res.json({ success: true, token: note.shareToken });
+    // Keep previously sent long links valid while returning a compact 128-bit token.
+    if (!note.shortShareToken) { note.shortShareToken = randomBytes(16).toString('base64url'); await note.save(); }
+    res.json({ success: true, token: note.shortShareToken });
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
 exports.sharedPdf = async (req, res) => {
   try {
-    if (!/^[a-f0-9-]{72}$/.test(req.params.token)) fail('Invalid sharing link.', 404);
-    const note = await SalesReturn.findOne({ shareToken: req.params.token });
+    const token = req.params.token;
+    if (!/^(?:[A-Za-z0-9_-]{22}|[a-f0-9-]{72})$/.test(token)) fail('Invalid sharing link.', 404);
+    const note = await SalesReturn.findOne(token.length === 22 ? { shortShareToken: token } : { shareToken: token });
     if (!note) fail('Credit note not found.', 404);
-    sendPdf(res, note);
+    sendPdf(res, await documentNote(note));
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
 exports.email = async (req, res) => {
   try {
     const { isEmail } = require('validator');
     if (typeof req.body.to !== 'string' || !isEmail(req.body.to.trim())) fail('Enter a valid email address.');
+    const { subject, message } = req.body;
+    if ([subject, message].some(value => value != null && typeof value !== 'string')) fail('Subject and message must be text.');
+    if (subject && (subject.length > 200 || /[\r\n]/.test(subject))) fail('Subject must be a single line of up to 200 characters.');
+    if (message && message.length > 10000) fail('Message must be up to 10000 characters.');
     if (!validId(req.params.id)) fail('Invalid credit note.');
     const note = await SalesReturn.findById(req.params.id);
     if (!note || note.status !== 'posted') fail('Only posted credit notes can be emailed.');
     const { transporter, user } = require('../utils/poEmail').getTransport();
     const info = await transporter.sendMail({ from: { name: 'Medyra Pharmaceutical', address: user }, to: req.body.to.trim(),
-      subject: `Credit Note ${note.returnNumber} - Medyra Pharmaceutical`,
-      text: `Please find attached Credit Note ${note.returnNumber} against invoice ${note.invoiceNumber}.`,
-      attachments: [{ filename: note.returnNumber.replace(/[^A-Za-z0-9_-]/g, '_') + '.pdf', content: pdfBuffer(note), contentType: 'application/pdf' }] });
+      subject: subject?.trim() || `Credit Note ${note.returnNumber} - Medyra Pharmaceutical`,
+      text: message?.trim() ? message : `Please find attached Credit Note ${note.returnNumber} against invoice ${note.invoiceNumber}.`,
+      attachments: [{ filename: note.returnNumber.replace(/[^A-Za-z0-9_-]/g, '_') + '.pdf', content: pdfBuffer(await documentNote(note)), contentType: 'application/pdf' }] });
     if (!(info.accepted || []).some(a => String(a).toLowerCase() === req.body.to.trim().toLowerCase())) fail('Mail server did not accept the recipient.', 502);
     res.json({ success: true, message: 'Mail server accepted the credit note for delivery.' });
   } catch (e) { res.status(e.status || 502).json({ success: false, message: e.status ? e.message : require('../utils/poEmail').emailError(e, 'credit note') }); }
@@ -209,7 +226,7 @@ exports.replacementSource = async (req, res) => {
     const note = await SalesReturn.findById(req.params.id);
     if (!note || note.status !== 'posted') fail('Only posted credit notes can send replacements.');
     const invoice = await Invoice.findById(note.invoice);
-    if (!invoice) fail('Original invoice not found.', 404);
+    if (!invoice || invoice.status === 'cancelled') fail('Original invoice is unavailable.', 404);
     const items = [];
     for (const item of note.items) {
       const remaining = item.quantity - Number(item.replacedQty || 0);
@@ -246,6 +263,7 @@ exports.sendReplacement = transaction(async (req, res) => {
   const seen = new Set(), shipped = [];
   let subtotal = 0, tax = 0;
   for (const input of items) {
+    if (!input || typeof input !== 'object' || !validId(input.itemId)) fail('Select a valid return item.');
     const id = String(input.itemId);
     if (seen.has(id)) fail('Each return item can appear only once per shipment.');
     seen.add(id);

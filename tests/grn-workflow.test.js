@@ -655,3 +655,79 @@ test('replacement form resolves original GRN dates even after its stock lot disa
   assert.equal(legacy.items[0].originalBatch.batchNumber, 'AUTO-DATES');
   assert.equal(legacy.items[0].originalBatch.expDate, '2028-01-01');
 });
+
+test('one PO line receives 3 + 2 across separate batches and rejects combined over-receipt', async () => {
+  const { product, po } = await setup(5);
+  const data = input(po, 3, 'SPLIT-A');
+  data.items.push({ ...data.items[0], receivedQty: 3, batchNumber: 'SPLIT-B', expDate: '2028-06-01' });
+  assert.equal((await call(receipt.createGRN, data)).success, false);
+  assert.equal((await Product.findById(product._id)).stock, 0);
+  data.items[1].receivedQty = 2;
+  const grn = await ok(receipt.createGRN, data);
+  assert.equal(grn.items.length, 2);
+  assert.deepEqual(grn.items.map(item => item.remainingQty), [0, 0]);
+  await ok(receipt.createGRN, data);
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.stock, 5);
+  assert.equal(stock.batches.find(batch => batch.batchNumber === 'SPLIT-A').quantity, 3);
+  assert.equal(stock.batches.find(batch => batch.batchNumber === 'SPLIT-B').quantity, 2);
+  const savedPO = await PurchaseOrder.findById(po._id);
+  assert.equal(savedPO.items[0].receivedQty, 5);
+  assert.equal(savedPO.items[0].remainingQty, 0);
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  assert.equal(invoice.items.length, 2);
+  assert.deepEqual(invoice.items.map(item => item.batchNumber), ['SPLIT-A', 'SPLIT-B']);
+  await ok(receipt.updateGRN, { items: [{ _id: grn.items[1]._id, batchNumber: 'SPLIT-B-CORRECTED', receivedQty: 2 }] }, { id: grn._id });
+  const corrected = await Product.findById(product._id);
+  assert.equal(corrected.batches.find(batch => batch.batchNumber === 'SPLIT-A').quantity, 3);
+  assert.equal(corrected.batches.find(batch => batch.batchNumber === 'SPLIT-B-CORRECTED').quantity, 2);
+});
+
+test('batch-specific purchase rates flow to stock and invoice without changing PO rates', async () => {
+  const { product, po } = await setup(5);
+  const data = input(po, 3, 'RATE-A');
+  data.items[0].unitPrice = 60;
+  data.items.push({ ...data.items[0], receivedQty: 2, unitPrice: 75, batchNumber: 'RATE-B' });
+  const grn = await ok(receipt.createGRN, data);
+  assert.equal(grn.subtotal, 330);
+  assert.equal(grn.totalTax, 39.6);
+  const stock = await Product.findById(product._id);
+  assert.equal(stock.batches.find(batch => batch.batchNumber === 'RATE-A').costPrice, 60);
+  assert.equal(stock.batches.find(batch => batch.batchNumber === 'RATE-B').costPrice, 75);
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  assert.deepEqual(invoice.items.map(item => item.unitPrice), [60, 75]);
+  assert.equal((await PurchaseOrder.findById(po._id)).items[0].unitPrice, 50);
+});
+
+test('partial replacement matches exact returned batch across multiple receipt rounds', async () => {
+  const { product, po } = await setup(6);
+  const receive = input(po, 2, 'PARTIAL-A');
+  receive.items.push({ ...receive.items[0], batchNumber: 'PARTIAL-B' }, { ...receive.items[0], batchNumber: 'PARTIAL-C' });
+  const grn = await ok(receipt.createGRN, receive);
+  const invoice = await ConsolidatedInvoice.findById(grn.consolidatedInvoiceId);
+  const doc = await ok(returns.createPurchaseReturn, returnInput(invoice, 2, { items: invoice.items.map(item => ({ invoiceItemId: String(item._id), quantity: 2 })) }));
+  const replacements = doc.items.map(item => ({ itemId: String(item._id), productId: String(product._id), batchNumber: item.batchNumber, quantity: 1 }));
+  for (const bad of [{ ...replacements[0], itemId: String(new mongoose.Types.ObjectId()) }, { productId: String(product._id), quantity: 1 }]) {
+    assert.equal((await call(returns.receiveReplacement, { items: [bad] }, { id: doc._id })).success, false);
+    assert.equal((await Product.findById(product._id)).stock, 0);
+  }
+  await ok(returns.receiveReplacement, { items: [...replacements].reverse() }, { id: doc._id });
+  let saved = await PurchaseReturn.findById(doc._id);
+  assert.deepEqual(saved.items.map(item => item.replacedQty), [1, 1, 1]);
+  assert.equal(saved.replacementStatus, 'partial');
+  let stock = await Product.findById(product._id);
+  assert.equal(stock.stock, 3);
+  for (const batch of ['PARTIAL-A', 'PARTIAL-B', 'PARTIAL-C']) assert.equal(stock.batches.find(b => b.batchNumber === batch).quantity, 1);
+  await ok(returns.receiveReplacement, { items: replacements.map((item, index) => ({ ...item, quantity: index === 1 ? 1 : 0 })) }, { id: doc._id });
+  saved = await PurchaseReturn.findById(doc._id);
+  assert.deepEqual(saved.items.map(item => item.replacedQty), [1, 2, 1]);
+  assert.equal(saved.replacementStatus, 'partial');
+  const over = await call(returns.receiveReplacement, { items: [replacements[0], replacements[1]] }, { id: doc._id });
+  assert.equal(over.success, false);
+  assert.equal((await Product.findById(product._id)).stock, 4);
+  await ok(returns.receiveReplacement, { items: [replacements[0], replacements[2]] }, { id: doc._id });
+  saved = await PurchaseReturn.findById(doc._id);
+  assert.deepEqual(saved.items.map(item => item.replacedQty), [2, 2, 2]);
+  assert.equal(saved.replacementStatus, 'received');
+  assert.equal((await Product.findById(product._id)).stock, 6);
+});

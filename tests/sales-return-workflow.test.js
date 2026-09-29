@@ -161,3 +161,103 @@ test('full credit includes positive and negative invoice rounding', () => {
     assert.equal(lines(invoice, [], [{ invoiceItemId: 'i', quantity: 1 }]).total, invoice.total);
   }
 });
+
+function shipment(note, product, quantity = 1) {
+  return { requestId: randomUUID(), sentDate: '2026-09-29', notes: 'Courier TEST',
+    items: [{ itemId: String(note.items[0]._id), quantity, ...(product.batches[0] ? { stockBatchId: String(product.batches[0]._id) } : {}) }] };
+}
+test('partial and full replacements consume stock/credit with history and balanced journals', async () => {
+  const { invoice, product } = await setup({ paid: 1180 });
+  const created = await call(controller.create, request(invoice));
+  const note = created.data, params = { id: String(note._id) };
+  const source = await call(controller.replacementSource, {}, params);
+  assert.equal(source.data.items[0].remaining, 2);
+  assert.equal(source.data.items[0].batches[0].available, 4);
+  const payload = shipment(note, product);
+  const partial = await call(controller.sendReplacement, payload, params);
+  assert.equal(partial.status, 200, JSON.stringify(partial));
+  assert.equal(partial.data.replacementStatus, 'partial');
+  assert.equal(partial.data.replacementCredit, 118);
+  assert.equal(partial.data.items[0].replacedQty, 1);
+  assert.equal((await Product.findById(product._id)).stock, 3);
+  assert.equal((await Invoice.findById(invoice._id)).customerCredit, 118);
+  assert.equal((await Invoice.findById(invoice._id)).paidAmount, 1180);
+  assert.equal(partial.data.replacementHistory[0].items[0].batchNumber, 'LOT-1');
+  assert.equal((await call(controller.sendReplacement, payload, params)).status, 200);
+  assert.equal((await Product.findById(product._id)).stock, 3);
+  assert.equal((await call(controller.sendReplacement, { ...payload, notes: 'Changed retry' }, params)).status, 409);
+  const full = await call(controller.sendReplacement, shipment(note, product), params);
+  assert.equal(full.status, 200, JSON.stringify(full));
+  assert.equal(full.data.replacementStatus, 'sent');
+  assert.equal(full.data.replacementCredit, 236);
+  assert.equal(full.data.replacementHistory.length, 2);
+  assert.equal((await Product.findById(product._id)).stock, 2);
+  assert.equal((await Invoice.findById(invoice._id)).customerCredit, 0);
+  assert.equal((await Invoice.findById(invoice._id)).returnTax, 0);
+  assert.equal((await call(controller.replacementSource, {}, params)).data.items.length, 0);
+  assert.equal((await call(controller.cancel, { reason: 'Cannot undo shipments' }, params)).status, 409);
+  assert.equal((await call(controller.sendReplacement, shipment(note, product), params)).status, 400);
+  const journals = await JournalEntry.find({ sourceId: note._id });
+  assert.equal(journals.length, 6);
+  journals.forEach(j => assert.equal(j.totalDebit, j.totalCredit));
+});
+test('damaged non-batch return can ship replacement stock and restore net invoice due', async () => {
+  const { invoice, product } = await setup({ nonBatch: true });
+  const { data: note } = await call(controller.create, request(invoice, 2, false));
+  const result = await call(controller.sendReplacement, shipment(note, product, 2), { id: String(note._id) });
+  assert.equal(result.status, 200, JSON.stringify(result));
+  assert.equal((await Product.findById(product._id)).stock, 0);
+  assert.equal((await Invoice.findById(invoice._id)).dueAmount, 1180);
+  assert.equal(result.data.replacementCredit, note.total);
+});
+test('replacement rejects expired/reserved lots, bad dates and excess quantities without writes', async () => {
+  const { invoice, product } = await setup();
+  const { data: note } = await call(controller.create, request(invoice));
+  const params = { id: String(note._id) }, body = shipment(note, product);
+  for (const override of [{ sentDate: '2026-09-27' }, { sentDate: '2026-02-30' }, { items: [null] },
+    { items: [{ ...body.items[0], quantity: 3 }] }, { items: [body.items[0], body.items[0]] },
+    { items: [{ ...body.items[0], stockBatchId: String(new mongoose.Types.ObjectId()) }] }]) {
+    assert.equal((await call(controller.sendReplacement, { ...body, ...override }, params)).status, 400);
+  }
+  await Product.updateOne({ _id: product._id }, { $set: { 'batches.0.expDate': '2020-01-01' } });
+  assert.equal((await call(controller.sendReplacement, body, params)).status, 400);
+  await Product.updateOne({ _id: product._id }, { $set: { 'batches.0.expDate': '2099-01-01', 'batches.0.reservedQuantity': 4 } });
+  assert.equal((await call(controller.sendReplacement, body, params)).status, 400);
+  assert.equal((await Product.findById(product._id)).stock, 4);
+  assert.equal((await SalesReturn.findById(note._id)).replacementHistory.length, 0);
+  assert.equal((await Invoice.findById(invoice._id)).returnCredit, 236);
+});
+test('replacement rollback restores stock and credit if the final invoice save fails', async () => {
+  const { invoice, product } = await setup();
+  const { data: note } = await call(controller.create, request(invoice));
+  const save = Invoice.prototype.save;
+  Invoice.prototype.save = async () => { throw new Error('Injected shipment failure'); };
+  try {
+    assert.equal((await call(controller.sendReplacement, shipment(note, product), { id: String(note._id) })).status, 500);
+    assert.equal((await Product.findById(product._id)).stock, 4);
+    assert.equal((await SalesReturn.findById(note._id)).replacementHistory.length, 0);
+    assert.equal(await JournalEntry.countDocuments({ sourceId: note._id }), 2);
+  } finally { Invoice.prototype.save = save; }
+});
+test('concurrent full replacements cannot ship the same pending units twice', async () => {
+  const { invoice, product } = await setup();
+  const { data: note } = await call(controller.create, request(invoice));
+  const params = { id: String(note._id) };
+  const results = await Promise.all([call(controller.sendReplacement, shipment(note, product, 2), params), call(controller.sendReplacement, shipment(note, product, 2), params)]);
+  assert.equal(results.filter(result => result.status === 200).length, 1);
+  assert.equal(results.filter(result => result.status === 400).length, 1);
+  assert.equal((await Product.findById(product._id)).stock, 2);
+  assert.equal((await SalesReturn.findById(note._id)).replacementCredit, 236);
+});
+test('full replacement applies return rounding only on the final shipment', async () => {
+  const { invoice, product } = await setup();
+  invoice.total = 1180.4; invoice.rounding = 0.4; await invoice.save();
+  const { data: note } = await call(controller.create, request(invoice, 10));
+  const params = { id: String(note._id) };
+  const first = await call(controller.sendReplacement, shipment(note, product, 3), params);
+  assert.equal(first.data.replacementCredit, 354);
+  const last = await call(controller.sendReplacement, shipment(note, product, 7), params);
+  assert.equal(last.status, 200, JSON.stringify(last));
+  assert.equal(last.data.replacementCredit, note.total);
+  assert.equal(last.data.replacementHistory[1].creditUsed, 826.4);
+});

@@ -470,7 +470,7 @@ exports.getPublicInvoiceView = async (req, res) => {
 </html>`;
 
     const pdf = require('../utils/purchaseInvoicePdf').buildPurchaseInvoicePdf(html, {
-      currency, symbol, logo: require('../utils/documentLogo')
+      currency, symbol, logo: require('../utils/documentLogo'), items
     });
     const filename = `Purchase-Invoice-${invoice.invoiceNumber}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
     res.set('Content-Type', 'application/pdf');
@@ -749,6 +749,11 @@ exports.createGRN = async (req, res) => {
       );
       await product.save();
       processedItems.push(processedItem);
+    }
+
+    // Every batch row reflects the PO line's remaining quantity after this receipt.
+    for (const item of processedItems) {
+      item.remainingQty = Math.max(0, item.orderedQty - item.alreadyReceived - lineReceived.get(idOf(item.purchaseOrderItemId)));
     }
 
     if (processedItems.length === 0) {

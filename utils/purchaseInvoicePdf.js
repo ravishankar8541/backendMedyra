@@ -1,10 +1,11 @@
 const { jsPDF } = require('jspdf');
 const { DOMParser } = require('linkedom');
 require('jspdf-autotable');
+const { purchasePdfLayout } = require('./purchasePdfLayout');
 
 // Reuse the print document's displayed values so invoice/payment calculations
 // remain identical. Parse it inertly; never mount its scripts or CSS in the app.
-function buildPurchaseInvoicePdf(html, { currency, symbol, logo } = {}) {
+function buildPurchaseInvoicePdf(html, { currency, symbol, logo, items = [] } = {}) {
   const source = new DOMParser().parseFromString(html, 'text/html');
   const root = source.querySelector('.invoice-container');
   if (!root?.querySelector('.items-table')) throw new Error('Invoice document could not be prepared.');
@@ -16,44 +17,59 @@ function buildPurchaseInvoicePdf(html, { currency, symbol, logo } = {}) {
   const text = node => clean(node?.textContent);
   const lines = node => [...(node?.querySelectorAll('p, h4') || [])].map(text).join('\n');
   const doc = new jsPDF({ compress: true });
-  const table = options => doc.autoTable({
-    margin: { left: 14, right: 14, top: 16, bottom: 16 },
-    styles: { fontSize: 9, cellPadding: 2, overflow: 'linebreak', textColor: [20, 30, 40] },
-    headStyles: { fillColor: [1, 58, 89], textColor: 255 },
-    theme: 'plain', ...options,
-  });
+  const { table, header: drawHeader, summary, footer } = purchasePdfLayout(doc);
   const header = root.querySelectorAll('.header-table td');
-  if (logo) {
-    doc.setFillColor(0);
-    doc.rect(14, 12, 40, 40, 'F');
-    doc.addImage(logo, 'PNG', 15, 13, 38, 38);
-  }
-  table({ startY: 12, tableWidth: 86, margin: { left: 110, right: 14, top: 16, bottom: 16 },
-    head: [['PURCHASE INVOICE']], body: [[lines(header[1])]],
-    headStyles: { fillColor: false, textColor: 0, fontSize: 15, halign: 'right' },
-    columnStyles: { 0: { halign: 'right', fontStyle: 'bold' } },
-  });
-  table({ startY: Math.max(logo ? 56 : 15, doc.lastAutoTable.finalY + 4), tableWidth: 105, body: [[lines(header[0])]] });
+  const headerEnd = drawHeader('Purchase Invoice', lines(header[0]), logo);
   const vendor = root.querySelector('.section-title')?.parentElement;
-  table({ startY: doc.lastAutoTable.finalY + 4, head: [['VENDOR DETAILS']], body: [[lines(vendor)]] });
+  table({ startY: headerEnd, body: [[`VENDOR DETAILS\n${lines(vendor)}`, lines(header[1])]], rowPageBreak: 'avoid',
+    columnStyles: { 0: { cellWidth: 91 }, 1: { cellWidth: 91 } },
+  });
   const cells = row => [...row.children].map(cell => cell.querySelector('p') ? lines(cell) : text(cell));
-  table({ startY: doc.lastAutoTable.finalY + 5, theme: 'grid', rowPageBreak: 'avoid',
-    head: [...root.querySelectorAll('.items-table thead tr')].map(cells),
-    body: [...root.querySelectorAll('.items-table tbody tr')].map(cells),
-    columnStyles: { 0: { cellWidth: 9 }, 1: { cellWidth: 48 }, 2: { cellWidth: 23 }, 3: { cellWidth: 13, halign: 'right' }, 4: { cellWidth: 17 }, 5: { cellWidth: 24, halign: 'right' }, 6: { cellWidth: 16, halign: 'right' }, 7: { cellWidth: 32, halign: 'right' } },
+  const groups = [];
+  const byProduct = new Map();
+  const date = value => {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleDateString('en-GB', { timeZone: 'UTC' });
+  };
+  [...root.querySelectorAll('.items-table tbody tr')].forEach((row, index) => {
+    const values = cells(row);
+    const item = items[index];
+    const identity = item?.purchaseOrderItemId || item?.productId?._id || item?.productId || item?.sku || values[1];
+    // Charges have no batch; different prices, tax rates or units remain separate.
+    const isProduct = item || (values[2] && !['-', 'N/A'].includes(values[2]));
+    const key = isProduct ? JSON.stringify([String(identity), values[1], values[4], values[5], values[6]]) : `charge-${index}`;
+    let group = byProduct.get(key);
+    if (!group) {
+      group = { values, quantity: 0, amount: 0, batches: [], isProduct };
+      byProduct.set(key, group); groups.push(group);
+    }
+    group.quantity += Number(values[3]);
+    group.amount += Number(values[7]);
+    group.batches.push([values[2], isProduct ? values[3] : '-', date(item?.mfgDate), date(item?.expDate)]);
   });
-  table({ startY: doc.lastAutoTable.finalY + 4,
-    body: [...root.querySelectorAll('.total-row')].map(row => [...row.children].map(text)),
-    columnStyles: { 0: { cellWidth: 125, halign: 'right' }, 1: { cellWidth: 57, halign: 'right', fontStyle: 'bold' } },
+  const body = groups.map((group, index) => {
+    // Pad each batch's wrapped text equally across its four columns, so quantities
+    // and dates stay aligned even for long batch numbers or page continuations.
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5);
+    const batchColumns = [[], [], [], []];
+    group.batches.forEach(batch => {
+      const wrapped = batch.map((value, i) => doc.splitTextToSize(String(value), [19, 9, 14, 14][i]));
+      const height = Math.max(...wrapped.map(lines => lines.length));
+      wrapped.forEach((lines, i) => batchColumns[i].push(...lines, ...Array(height - lines.length).fill('')));
+    });
+    return [index + 1, group.values[1], ...batchColumns.map(lines => lines.join('\n')), String(group.quantity), group.values[4], group.values[5], group.values[6], group.amount.toFixed(2)];
   });
-  table({ startY: doc.lastAutoTable.finalY + 4, body: [[lines(root.querySelector('.bottom-grid > div'))]] });
+  table({ startY: doc.lastAutoTable.finalY, theme: 'grid', rowPageBreak: 'avoid',
+    styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 2, textColor: 20, lineColor: [155, 155, 155], lineWidth: 0.2, overflow: 'linebreak' },
+    head: [['#', 'Item & Description', 'Batch', 'Batch Qty', 'Mfg Date', 'Exp Date', 'Qty', 'Unit', `Rate (${currency || 'INR'})`, 'Tax', `Total (${currency || 'INR'})`]],
+    body,
+    columnStyles: Object.fromEntries([7, 34, 23, 13, 18, 18, 12, 12, 17, 10, 18].map((cellWidth, i) => [i, { cellWidth, ...([3, 6, 8, 9, 10].includes(i) ? { halign: 'right' } : {}) }])),
+  });
+  summary(lines(root.querySelector('.bottom-grid > div')),
+    [...root.querySelectorAll('.total-row')].map(row => [...row.children].map(text)));
   doc.setProperties({ title: text(source.querySelector('title')) || 'Purchase Invoice', author: 'Medyra Pharmaceutical' });
-  const pages = doc.getNumberOfPages();
-  for (let page = 1; page <= pages; page++) {
-    doc.setPage(page);
-    doc.setFontSize(8);
-    doc.text(`Purchase Invoice | ${page} / ${pages}`, 196, 289, { align: 'right' });
-  }
+  footer('Purchase Invoice');
   return doc;
 }
 

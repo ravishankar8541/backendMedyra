@@ -477,9 +477,16 @@ exports.receiveReplacement = transaction(async (req, res) => {
     const qty = Number(rep.quantity);
     if (!Number.isFinite(qty) || qty <= 0) continue; // Skip 0 quantity items gracefully
 
-    const targetItem = doc.items.find(
-      (i) => idOf(i._id) === idOf(rep.itemId) || idOf(i.product) === idOf(rep.productId)
-    );
+    // An explicit return-line ID must win over the shared product ID: the same
+    // product can appear several times, once for each returned batch.
+    let targetItem;
+    if (rep.itemId) {
+      targetItem = doc.items.find(i => idOf(i._id) === idOf(rep.itemId));
+    } else {
+      const candidates = doc.items.filter(i => idOf(i.product) === idOf(rep.productId));
+      if (candidates.length > 1) fail('Select the exact returned batch to receive its replacement.');
+      targetItem = candidates[0];
+    }
     if (!targetItem) fail('Unknown item on return.');
 
     const alreadyReplaced = Number(targetItem.replacedQty || 0);
@@ -955,7 +962,7 @@ exports.getPublicDebitNoteView = async (req, res) => {
 </body>
 </html>`;
 
-    const pdf = require('../utils/debitNotePdf').buildDebitNotePdf(html, { currency, symbol: sym });
+    const pdf = require('../utils/debitNotePdf').buildDebitNotePdf(html, { currency, symbol: sym, items: doc.items || [] });
     const filename = `Debit-Note-${doc.returnNumber}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `inline; filename="${filename}.pdf"`);
