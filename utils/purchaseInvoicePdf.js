@@ -35,10 +35,10 @@ function buildPurchaseInvoicePdf(html, { currency, symbol, logo, items = [] } = 
   [...root.querySelectorAll('.items-table tbody tr')].forEach((row, index) => {
     const values = cells(row);
     const item = items[index];
-    const identity = item?.purchaseOrderItemId || item?.productId?._id || item?.productId || item?.sku || values[1];
-    // Charges have no batch; different prices, tax rates or units remain separate.
+    const identity = item?.productId?._id || item?.productId || item?.sku || values[1];
+    // Group product batches across PO lines and rates; keep units and descriptions distinct.
     const isProduct = item || (values[2] && !['-', 'N/A'].includes(values[2]));
-    const key = isProduct ? JSON.stringify([String(identity), values[1], values[4], values[5], values[6]]) : `charge-${index}`;
+    const key = isProduct ? JSON.stringify([String(identity), values[1], values[4]]) : `charge-${index}`;
     let group = byProduct.get(key);
     if (!group) {
       group = { values, quantity: 0, amount: 0, batches: [], isProduct };
@@ -46,19 +46,21 @@ function buildPurchaseInvoicePdf(html, { currency, symbol, logo, items = [] } = 
     }
     group.quantity += Number(values[3]);
     group.amount += Number(values[7]);
-    group.batches.push([values[2], isProduct ? values[3] : '-', date(item?.mfgDate), date(item?.expDate)]);
+    group.batches.push([values[2], isProduct ? values[3] : '-', date(item?.mfgDate), date(item?.expDate), values[5], values[6]]);
   });
   const body = groups.map((group, index) => {
     // Pad each batch's wrapped text equally across its four columns, so quantities
     // and dates stay aligned even for long batch numbers or page continuations.
     doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5);
-    const batchColumns = [[], [], [], []];
+    const batchColumns = [[], [], [], [], [], []];
     group.batches.forEach(batch => {
-      const wrapped = batch.map((value, i) => doc.splitTextToSize(String(value), [19, 9, 14, 14][i]));
+      const wrapped = batch.map((value, i) => doc.splitTextToSize(String(value), [19, 9, 14, 14, 13, 6][i]));
       const height = Math.max(...wrapped.map(lines => lines.length));
       wrapped.forEach((lines, i) => batchColumns[i].push(...lines, ...Array(height - lines.length).fill('')));
     });
-    return [index + 1, group.values[1], ...batchColumns.map(lines => lines.join('\n')), String(group.quantity), group.values[4], group.values[5], group.values[6], group.amount.toFixed(2)];
+    const taxRates = new Set(group.batches.map(batch => batch[5]));
+    const taxDisplay = taxRates.size === 1 ? group.batches[0][5] : batchColumns[5].join('\n');
+    return [index + 1, group.values[1], ...batchColumns.slice(0, 4).map(lines => lines.join('\n')), String(group.quantity), group.values[4], batchColumns[4].join('\n'), taxDisplay, group.amount.toFixed(2)];
   });
   table({ startY: doc.lastAutoTable.finalY, theme: 'grid', rowPageBreak: 'avoid',
     styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 2, textColor: 20, lineColor: [155, 155, 155], lineWidth: 0.2, overflow: 'linebreak' },

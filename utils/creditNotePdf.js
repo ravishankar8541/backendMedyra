@@ -3,6 +3,7 @@ require('jspdf-autotable');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const logo = require('./documentLogo');
+const creditNoteGroups = require('./creditNoteGroups');
 
 // Default company block for credit notes (Sales Returns only).
 const DEFAULT_COMPANY = {
@@ -80,13 +81,22 @@ module.exports = note => {
   table({ startY: pdf.lastAutoTable.finalY, head: [['Bill To']], body: [[
     [customer.name, customer.address, `GSTIN: ${customer.gst || 'N/A'}`].filter(Boolean).join('\n'),
   ]], rowPageBreak: 'avoid' });
+  // Match Tax Invoice: one product row with aligned batch details inside it.
+  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8.5);
+  const itemRows = creditNoteGroups(note.items).map((item, index) => {
+    const columns = [[], [], []];
+    for (const batch of item.batches) {
+      const values = [batch.batchNumber, `${batch.quantity}\n${item.unit || ''}`, date(batch.expiryDate)];
+      const wrapped = values.map((value, column) => pdf.splitTextToSize(value, [21, 15, 24][column]));
+      const height = Math.max(...wrapped.map(lines => lines.length));
+      wrapped.forEach((lines, column) => columns[column].push(...lines, ...Array(height - lines.length).fill('')));
+    }
+    return [index + 1, `${item.productName || '-'}\nHSN: ${item.hsn || '-'}${item.restock === false ? '\nNot added to saleable stock' : ''}`,
+      ...columns.map(lines => lines.join('\n')), `${item.quantity}\n${item.unit || ''}`, number(item.unitPrice), number(item.subtotal)];
+  });
   table({ startY: pdf.lastAutoTable.finalY, rowPageBreak: 'avoid',
     head: [['S.\nno', 'Item & Description', 'Manufacturer\nBatch#', 'Batch Qty', 'Expiry Date', 'Qty', 'Rate', 'Amount']],
-    body: (note.items || []).map((item, index) => [
-      index + 1, `${item.productName || '-'}\nHSN: ${item.hsn || '-'}${item.restock === false ? '\nNot added to saleable stock' : ''}`,
-      item.batchNumber || '-', `${item.quantity || 0}\n${item.unit || ''}`, date(item.expiryDate),
-      `${item.quantity || 0}\n${item.unit || ''}`, number(item.unitPrice), number(item.subtotal ?? (Number(item.quantity || 0) * Number(item.unitPrice || 0))),
-    ]),
+    body: itemRows,
     columnStyles: { 0: { cellWidth: 8, halign: 'center' }, 1: { cellWidth: 46 }, 2: { cellWidth: 24 }, 3: { cellWidth: 18, halign: 'right' }, 4: { cellWidth: 27 }, 5: { cellWidth: 17, halign: 'right' }, 6: { cellWidth: 18, halign: 'right' }, 7: { cellWidth: 24, halign: 'right' } },
   });
   const taxGroups = new Map();

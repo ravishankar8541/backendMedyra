@@ -7,7 +7,7 @@ exports.createProduct = async (req, res) => {
   try {
     const { basicInfo, pricing, media } = req.body;
     
-    console.log('📦 Received product data:', JSON.stringify(req.body, null, 2));
+    
 
     if (!basicInfo || !basicInfo.name || !basicInfo.category) {
       return res.status(400).json({
@@ -68,12 +68,12 @@ exports.createProduct = async (req, res) => {
       createdBy: req.user?.id
     };
 
-    console.log('📝 Saving product:', JSON.stringify(productData, null, 2));
+    
 
     const product = new Product(productData);
     await product.save();
 
-    console.log('✅ Product created successfully. ID:', product._id);
+    
 
     res.status(201).json({
       success: true,
@@ -416,7 +416,7 @@ exports.updateBatch = async (req, res) => {
         batch.sellingPrice = parseFloat(sellingPrice) || 0;
       }
       
-      console.log(`✅ Batch ${batch.batchNumber} fully updated`);
+      
     } 
     else if (action === 'add') {
       // ADD stock to existing specific lot
@@ -442,7 +442,7 @@ exports.updateBatch = async (req, res) => {
         batch.sellingPrice = parseFloat(sellingPrice) || batch.sellingPrice;
       }
       
-      console.log(`✅ Added ${addQuantity} to batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+      
     } 
     else {
       // REMOVE stock from batch
@@ -464,11 +464,11 @@ exports.updateBatch = async (req, res) => {
       batch.quantity -= removeQuantity;
       batch.reason = reason || `Stock removal (${removeQuantity} units)`;
       
-      console.log(`✅ Removed ${removeQuantity} from batch ${batch.batchNumber}. New quantity: ${batch.quantity}`);
+      
       
       if (batch.quantity === 0) {
         product.batches.splice(index, 1);
-        console.log(`🗑️ Batch ${batch.batchNumber} removed (quantity became 0)`);
+        
       }
     }
 
@@ -518,7 +518,7 @@ exports.deleteBatch = async (req, res) => {
     product.batches.splice(index, 1);
     await product.save();
 
-    console.log(`🗑️ Batch ${batchNumber} deleted successfully`);
+    
 
     res.json({
       success: true,

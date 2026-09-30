@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const mongoose = require('mongoose');
 const Product = require('../models/Product');
 const Lead = require('../models/Lead');
@@ -782,7 +783,16 @@ exports.convertProformaToInvoice = async (req, res) => {
     }
 
     const sourceItems = (customItems && customItems.length > 0) ? customItems : (proforma.items || []);
+    if (sourceItems.some(item => item.rate == null || String(item.rate).trim() === '' || !Number.isFinite(Number(item.rate)) || Number(item.rate) < 0)) {
+      return res.status(400).json({ success: false, message: 'Enter a valid non-negative rate for every invoice line.' });
+    }
     const invoiceTaxType = req.body.taxType ?? proforma.taxType ?? 'cgst_sgst';
+    const { supplyState } = require('../utils/supplyState');
+    const destinationState = supplyState(req.body.placeOfSupply || proforma.placeOfSupply);
+    const supplierState = process.env.COMPANY_STATE_CODE || '07';
+    if ((proforma.type || 'domestic') === 'domestic' && destinationState && invoiceTaxType !== (destinationState === supplierState ? 'cgst_sgst' : 'igst')) {
+      return res.status(400).json({ success: false, message: `GST structure does not match Place of Supply. Select ${destinationState === supplierState ? 'CGST + SGST' : 'IGST'} for this invoice.` });
+    }
     if (!['cgst_sgst', 'igst'].includes(invoiceTaxType)) {
       return res.status(400).json({ success: false, message: 'Select CGST + SGST or IGST.' });
     }
@@ -908,7 +918,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       type: proforma.type || 'domestic',
       date: new Date().toISOString().split('T')[0],
       dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      placeOfSupply: proforma.placeOfSupply || 'Gujarat (24)',
+      placeOfSupply: req.body.placeOfSupply || proforma.placeOfSupply || '',
       paymentTerms: proforma.paymentTerms || '100% Advance',
       currency: finalCurrency,
       exchangeRate: exchangeRateVal,
@@ -928,7 +938,7 @@ exports.convertProformaToInvoice = async (req, res) => {
       tax: Math.round(tax * 100) / 100,
       total: grandTotal,
       rounding,
-      totalInWords: proforma.totalInWords || '',
+      totalInWords: '',
       notes: proforma.notes || 'Thanks for your business.',
       terms: proforma.terms || '"NOT COVER UNDER NARCOTICS & SCOMET LIST."',
       proformaNumber: proforma.number,
@@ -1366,7 +1376,7 @@ exports.getLeads = async (req, res) => {
     const query = {};
 
     // ✅ ROLE FILTER: Non-admin / non-manager users (e.g. telecallers) only see their own assigned/created leads
-    if (req.user && req.user.role !== 'admin' && req.user.role !== 'manager') {
+    if (req.user && !can(req.user, 'sales', 'all_records')) {
       const userId = req.user.id || req.user._id;
       query.$or = [
         { assignedTo: userId },
@@ -1484,7 +1494,7 @@ exports.deleteLead = async (req, res) => {
 exports.getLeadStats = async (req, res) => {
   try {
     const matchQuery = {};
-    if (req.user && req.user.role !== 'admin' && req.user.role !== 'manager') {
+    if (req.user && !can(req.user, 'sales', 'all_records')) {
       const uId = new mongoose.Types.ObjectId(req.user.id || req.user._id);
       matchQuery.$or = [
         { assignedTo: uId },

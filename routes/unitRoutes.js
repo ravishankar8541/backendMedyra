@@ -1,7 +1,7 @@
 // routes/unitRoutes.js
 const express = require("express");
 const router = express.Router();
-const { protect, restrictTo } = require("../middleware/auth");
+const { protect, authorize } = require("../middleware/auth");
 const {
   getUnits,
   createUnit,
@@ -12,9 +12,9 @@ const {
 router.get("/", protect, getUnits);
 
 // Create unit (admin / manager)
-router.post("/", protect, restrictTo("admin", "manager"), createUnit);
+router.post("/", protect, authorize(), createUnit);
 
 // Delete unit (admin only)
-router.delete("/:id", protect, restrictTo("admin"), deleteUnit);
+router.delete("/:id", protect, authorize(), deleteUnit);
 
 module.exports = router;

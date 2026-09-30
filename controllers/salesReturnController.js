@@ -109,7 +109,14 @@ exports.getSource = async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
 exports.list = async (req, res) => {
-  try { res.json({ success: true, data: await SalesReturn.find().sort({ createdAt: -1 }).limit(1000) }); }
+  try {
+    const query = {};
+    if (!require('../utils/accessPolicy').can(req.user, 'invoices', 'all_records')) {
+      const userId = req.user._id || req.user.id;
+      const invoices = await Invoice.find({ $or: [{ createdBy: userId }, { assignedTo: userId }] }).select('_id');
+      query.invoice = { $in: invoices.map(invoice => invoice._id) };
+    }
+    res.json({ success: true, data: await SalesReturn.find(query).sort({ createdAt: -1 }).limit(1000) }); }
   catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 exports.create = transaction(async (req, res) => {

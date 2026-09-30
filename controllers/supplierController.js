@@ -46,12 +46,12 @@ exports.createSupplier = async (req, res) => {
     const mappedData = mapFrontendToBackend(req.body);
     mappedData.createdBy = req.user.id;
 
-    console.log('📦 Creating supplier with mapped data:', mappedData);
+    
 
     const supplier = new Supplier(mappedData);
     await supplier.save();
 
-    console.log('✅ Supplier created:', supplier._id);
+    
 
     res.status(201).json({
       success: true,
@@ -205,7 +205,7 @@ exports.updateSupplier = async (req, res) => {
     delete mappedData.__v;
     delete mappedData.createdBy;
 
-    console.log('📦 Updating supplier with mapped data:', mappedData);
+    
 
     const supplier = await Supplier.findByIdAndUpdate(
       supplierId,
@@ -224,7 +224,7 @@ exports.updateSupplier = async (req, res) => {
       });
     }
 
-    console.log('✅ Supplier updated:', supplier._id);
+    
 
     // ✅ Return flat structure for frontend
     const flatData = {
@@ -302,7 +302,7 @@ exports.deleteSupplier = async (req, res) => {
 
     await supplier.deleteOne();
     
-    console.log('✅ Supplier deleted:', req.params.id);
+    
 
     res.json({ 
       success: true, 

@@ -9,7 +9,7 @@ const {
   changePassword,
   logout
 } = require('../controllers/authController');
-const { protect } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 
 // Validation rules
 const registerValidation = [
@@ -25,7 +25,10 @@ const loginValidation = [
 ];
 
 // Routes
-router.post('/register', registerValidation, register);
+const recovery = require('../controllers/passwordRecoveryController');
+router.post('/forgot-password', recovery.limit, recovery.forgot);
+router.post('/reset-password', recovery.limit, recovery.reset);
+router.post('/register', protect, authorize(), registerValidation, require('../controllers/userController').createUser);
 router.post('/login', loginValidation, login);
 router.get('/me', protect, getMe);
 router.put('/change-password', protect, changePassword);

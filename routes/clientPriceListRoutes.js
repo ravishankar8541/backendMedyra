@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const {
   getClientPriceLists,
   getPriceListByClient,
@@ -13,7 +13,7 @@ router.use(protect);
 router.get('/', getClientPriceLists);
 router.get('/client/:clientId', getPriceListByClient);
 
-router.post('/', restrictTo('admin', 'manager', 'telecaller', 'staff'), upsertClientPriceList);
-router.delete('/client/:clientId', restrictTo('admin', 'manager'), deleteClientPriceList);
+router.post('/', authorize(), upsertClientPriceList);
+router.delete('/client/:clientId', authorize(), deleteClientPriceList);
 
 module.exports = router;

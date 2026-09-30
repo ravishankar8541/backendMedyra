@@ -6,6 +6,8 @@ const JournalEntry = require('../models/JournalEntry');
 const Invoice = require('../models/Invoice');
 const { ConsolidatedInvoice } = require('../models/GoodsReceipt');
 const Product = require('../models/Product');
+const math = require('../utils/accountingMath');
+const { randomBytes } = require('node:crypto');
 
 // Standard Chart of Accounts Template (Zoho Books Standard)
 const DEFAULT_ACCOUNTS = [
@@ -49,32 +51,15 @@ const DEFAULT_ACCOUNTS = [
 ];
 
 // Helper: Safely parse Date without throwing Mongoose CastError on DD/MM/YYYY or strings
-const parseSafeDate = (d) => {
-  if (!d) return new Date();
-  if (d instanceof Date && !isNaN(d.getTime())) return d;
-  if (typeof d === 'string') {
-    const trimmed = d.trim();
-    const parts = trimmed.split(/[-/]/);
-    if (parts.length === 3 && parts[0].length <= 2 && parts[2].length === 4) {
-      const day = parts[0].padStart(2, '0');
-      const month = parts[1].padStart(2, '0');
-      const year = parts[2];
-      const parsed = new Date(`${year}-${month}-${day}`);
-      if (!isNaN(parsed.getTime())) return parsed;
-    }
-    const standardParsed = new Date(trimmed);
-    if (!isNaN(standardParsed.getTime())) return standardParsed;
-  }
-  return new Date();
-};
+const parseSafeDate = math.date;
 
 const getAccountMap = async () => {
-  const existing = await Account.find({ isActive: true });
+  const existing = await Account.find({});
   const map = new Map(existing.map(a => [a.code, a]));
 
   for (const template of DEFAULT_ACCOUNTS) {
     if (!map.has(template.code)) {
-      const created = await Account.create(template);
+      const created = await Account.findOneAndUpdate({ code: template.code }, { $setOnInsert: template }, { upsert: true, new: true, setDefaultsOnInsert: true });
       map.set(template.code, created);
     }
   }
@@ -109,21 +94,8 @@ const getLiveInventoryValuation = async () => {
 // =========================================================================
 // AUTOMATED JOURNAL ENTRY SYNCHRONIZER
 // =========================================================================
-const syncAllAutomatedJournals = async () => {
+const performJournalSync = async () => {
   try {
-    // ⭐ CRITICAL FIX: Automatically drop the obsolete voucherNo_1 duplicate key index
-    try {
-      const collection = mongoose.connection.collection('journalentries');
-      const existingIndexes = await collection.indexes();
-      const hasBadIndex = existingIndexes.some(idx => idx.name === 'voucherNo_1');
-      if (hasBadIndex) {
-        await collection.dropIndex('voucherNo_1');
-        console.log('✅ Successfully dropped obsolete voucherNo_1 index to fix duplicate key error.');
-      }
-    } catch (idxError) {
-      // Ignore if index doesn't exist
-    }
-
     const accMap = await getAccountMap();
 
     const getAcc = (code, fallback = '1000') => {
@@ -131,7 +103,7 @@ const syncAllAutomatedJournals = async () => {
     };
 
     const [salesInvoices, purchaseInvoices] = await Promise.all([
-      Invoice.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: 1 }),
+      Invoice.find({ status: { $nin: ['cancelled', 'draft'] } }).sort({ createdAt: 1 }),
       ConsolidatedInvoice.find().sort({ createdAt: 1 })
     ]);
 
@@ -154,7 +126,7 @@ const syncAllAutomatedJournals = async () => {
       const refNum = jv.referenceNumber || '';
 
       if (['sales_invoice', 'inventory_adjustment', 'payment_receipt'].includes(jv.sourceModule)) {
-        if (!salesInvIds.has(srcId) && !salesInvNums.has(refNum)) {
+        if (srcId ? !salesInvIds.has(srcId) : !salesInvNums.has(refNum)) {
           await JournalEntry.findByIdAndDelete(jv._id);
         }
       } else if (['purchase_invoice', 'payment_disbursement'].includes(jv.sourceModule)) {
@@ -172,7 +144,7 @@ const syncAllAutomatedJournals = async () => {
       const invDate = parseSafeDate(inv.date || inv.createdAt);
       const isDomestic = inv.type === 'domestic' || !inv.type || inv.currency === 'INR';
       const invNum = inv.invoiceNumber;
-      const cleanInvNum = invNum.replace(/[^a-zA-Z0-9]/g, '');
+      const cleanInvNum = String(invId);
       const totalAmount = Number(inv.total) || 0;
       const subtotal = Number(inv.subtotal) || 0;
       const tax = Number(inv.tax) || 0;
@@ -180,6 +152,8 @@ const syncAllAutomatedJournals = async () => {
       const insurance = Number(inv.insurance) || 0;
       const cogs = Number(inv.totalCost) || 0;
 
+      if (totalAmount <= 0) await JournalEntry.deleteMany({ sourceModule: 'sales_invoice', sourceId: invId });
+      if (totalAmount <= 0 || cogs <= 0) await JournalEntry.deleteMany({ sourceModule: 'inventory_adjustment', sourceId: invId });
       if (totalAmount > 0) {
         const lines = [];
 
@@ -298,7 +272,7 @@ const syncAllAutomatedJournals = async () => {
 
         await JournalEntry.findOneAndUpdate(
           { sourceModule: 'sales_invoice', sourceId: invId },
-          jvPayload,
+          math.inRupees(jvPayload, inv),
           { upsert: true, new: true }
         );
 
@@ -336,7 +310,7 @@ const syncAllAutomatedJournals = async () => {
           };
           await JournalEntry.findOneAndUpdate(
             { sourceModule: 'inventory_adjustment', sourceId: invId },
-            cogsPayload,
+            math.inRupees(cogsPayload, { currency: 'INR' }),
             { upsert: true, new: true }
           );
         }
@@ -353,13 +327,15 @@ const syncAllAutomatedJournals = async () => {
         }];
       }
 
+      const receiptKeys = [];
       for (let pIdx = 0; pIdx < customerPayments.length; pIdx++) {
         const pay = customerPayments[pIdx];
         const payAmt = Number(pay.amount) || 0;
         if (payAmt <= 0) continue;
 
         const payKey = `JV-RCT-${cleanInvNum}-${pIdx + 1}`;
-        const bankCode = (pay.method === 'cash') ? '1000' : '1010';
+        receiptKeys.push(payKey);
+        const bankCode = (String(pay.method).toLowerCase() === 'cash') ? '1000' : '1010';
 
         const rctPayload = {
           entryNumber: payKey,
@@ -394,10 +370,11 @@ const syncAllAutomatedJournals = async () => {
 
         await JournalEntry.findOneAndUpdate(
           { entryNumber: payKey },
-          rctPayload,
+          math.inRupees(rctPayload, inv),
           { upsert: true, new: true }
         );
       }
+      await JournalEntry.deleteMany({ sourceModule: 'payment_receipt', sourceId: invId, entryNumber: { $nin: receiptKeys } });
     }
 
     // -------------------------------------------------------------
@@ -406,7 +383,7 @@ const syncAllAutomatedJournals = async () => {
     for (const pi of purchaseInvoices) {
       const piId = pi._id;
       const piNum = pi.invoiceNumber;
-      const cleanPiNum = piNum.replace(/[^a-zA-Z0-9]/g, '');
+      const cleanPiNum = String(piId);
       const piDate = parseSafeDate(pi.invoiceDate || pi.createdAt);
       const grandTotal = Number(pi.grandTotal) || 0;
       const subtotal = Number(pi.subtotal) || 0;
@@ -549,7 +526,7 @@ const syncAllAutomatedJournals = async () => {
 
         await JournalEntry.findOneAndUpdate(
           { sourceModule: 'purchase_invoice', sourceId: piId },
-          piJvPayload,
+          math.inRupees(piJvPayload, pi),
           { upsert: true, new: true }
         );
       }
@@ -575,12 +552,14 @@ const syncAllAutomatedJournals = async () => {
         }];
       }
 
+      const disbursementKeys = [];
       for (let pIdx = 0; pIdx < piPayments.length; pIdx++) {
         const pay = piPayments[pIdx];
         const payAmt = Number(pay.amount) || 0;
         if (payAmt <= 0) continue;
 
         const payKey = `JV-DSB-${cleanPiNum}-${pIdx + 1}`;
+        disbursementKeys.push(payKey);
         const payMethodLower = String(pay.method || '').toLowerCase();
         const bankCode = payMethodLower === 'cash' ? '1000' : '1010';
 
@@ -617,16 +596,24 @@ const syncAllAutomatedJournals = async () => {
 
         await JournalEntry.findOneAndUpdate(
           { entryNumber: payKey },
-          dsbPayload,
+          math.inRupees(dsbPayload, pi),
           { upsert: true, new: true }
         );
       }
+      await JournalEntry.deleteMany({ sourceModule: 'payment_disbursement', sourceId: piId, entryNumber: { $nin: disbursementKeys } });
     }
   } catch (err) {
     console.error('Automated Journal Sync error:', err);
+    throw err;
   }
 };
 
+// Share concurrent report-triggered syncs in this server process.
+let activeSync;
+const syncAllAutomatedJournals = () => {
+  if (!activeSync) activeSync = performJournalSync().finally(() => { activeSync = null; });
+  return activeSync;
+};
 exports.syncAllAutomatedJournals = syncAllAutomatedJournals;
 
 exports.syncAutomatedJournals = async (req, res) => {
@@ -643,7 +630,7 @@ exports.initChartOfAccounts = async (req, res) => {
     const accMap = await getAccountMap();
     res.json({ success: true, message: `Chart of Accounts verified (${accMap.size} accounts active).` });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -651,25 +638,28 @@ exports.getAccounts = async (req, res) => {
   try {
     await getAccountMap();
     const { type, search } = req.query;
-    const query = { isActive: true };
+    const query = req.query.includeInactive === 'true' ? {} : { isActive: true };
     if (type && type !== 'all') query.type = type;
     if (search) {
       query.$or = [
-        { code: { $regex: search, $options: 'i' } },
-        { name: { $regex: search, $options: 'i' } }
+        { code: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+        { name: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
       ];
     }
 
     const accounts = await Account.find(query).sort({ code: 1 });
-    res.json({ success: true, data: accounts });
+    res.json({ success: true, data: accounts.map(account => ({ ...account.toObject(), isSystem: account.isSystem || DEFAULT_ACCOUNTS.some(a => a.code === account.code) })) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.createAccount = async (req, res) => {
   try {
     const { code, name, type, subType, currency, description } = req.body;
+    if (typeof code !== 'string' || !code.trim() || typeof name !== 'string' || !name.trim()) throw math.invalid('Account code and name are required.');
+    if (currency && currency !== 'INR') throw math.invalid('Accounts must use the INR reporting currency.');
+    math.classification(type, subType);
     const exists = await Account.findOne({ code: code.trim() });
     if (exists) {
       return res.status(400).json({ success: false, message: `Account code "${code}" already exists` });
@@ -687,22 +677,28 @@ exports.createAccount = async (req, res) => {
 
     res.status(201).json({ success: true, data: account, message: 'Account created successfully' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.updateAccount = async (req, res) => {
   try {
     const { name, subType, description, isActive } = req.body;
+    const existing = await Account.findById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'Account not found' });
+    math.classification(existing.type, subType === undefined ? existing.subType : subType);
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) throw math.invalid('Account name is required.');
+    if (isActive !== undefined && typeof isActive !== 'boolean') throw math.invalid('Active status must be true or false.');
+    if ((existing.isSystem || DEFAULT_ACCOUNTS.some(a => a.code === existing.code)) && (isActive === false || (subType && subType !== existing.subType))) throw math.invalid('System account classification and active status are protected.');
     const account = await Account.findByIdAndUpdate(
       req.params.id,
       { name, subType, description, isActive },
-      { new: true }
+      { new: true, runValidators: true }
     );
     if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
     res.json({ success: true, data: account, message: 'Account updated successfully' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -712,7 +708,7 @@ exports.deleteAccount = async (req, res) => {
     const account = await Account.findById(id);
     if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
 
-    if (account.isSystem) {
+    if (account.isSystem || DEFAULT_ACCOUNTS.some(a => a.code === account.code)) {
       return res.status(400).json({ success: false, message: 'System accounts cannot be deleted.' });
     }
 
@@ -724,15 +720,32 @@ exports.deleteAccount = async (req, res) => {
     await account.deleteOne();
     res.json({ success: true, message: 'Account deleted successfully.' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
+};
+
+// Returns keep their document currency; normalize them for INR ledger reports.
+const reportingEntries = async entries => {
+  const sources = new Map();
+  return Promise.all(entries.map(async entry => {
+    if (!entry.currency || entry.currency === 'INR') return entry;
+    const model = entry.sourceModule === 'sales_return' ? require('../models/SalesReturn') : entry.sourceModule === 'purchase_return' ? require('../models/PurchaseReturn') : null;
+    if (!model) throw math.invalid('A foreign-currency journal needs its source exchange rate before INR reporting.');
+    const key = entry.sourceModule + ':' + entry.sourceId;
+    if (!sources.has(key)) sources.set(key, Promise.resolve(model.findById(entry.sourceId)));
+    const source = await sources.get(key);
+    if (!source) throw math.invalid('The source return is missing; its exchange rate cannot be determined.');
+    return math.inRupees(entry, source);
+  }));
 };
 
 exports.getJournalEntries = async (req, res) => {
   try {
     await syncAllAutomatedJournals();
 
-    const { page = 1, limit = 50, search, sourceModule, startDate, endDate } = req.query;
+    const { search, sourceModule, startDate, endDate } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1), limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    math.range(startDate, endDate);
     const query = {};
 
     if (sourceModule && sourceModule !== 'all') {
@@ -741,18 +754,18 @@ exports.getJournalEntries = async (req, res) => {
 
     if (search) {
       query.$or = [
-        { entryNumber: { $regex: search, $options: 'i' } },
-        { voucherNo: { $regex: search, $options: 'i' } },
-        { referenceNumber: { $regex: search, $options: 'i' } },
-        { memo: { $regex: search, $options: 'i' } },
-        { 'lines.accountName': { $regex: search, $options: 'i' } }
+        { entryNumber: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+        { voucherNo: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+        { referenceNumber: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+        { memo: { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+        { 'lines.accountName': { $regex: String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
       ];
     }
 
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = parseSafeDate(startDate);
-      if (endDate) query.date.$lte = parseSafeDate(endDate);
+      if (endDate) query.date.$lte = parseSafeDate(endDate, true);
     }
 
     const entries = await JournalEntry.find(query)
@@ -766,7 +779,7 @@ exports.getJournalEntries = async (req, res) => {
 
     res.json({
       success: true,
-      data: entries,
+      data: await reportingEntries(entries),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -775,7 +788,7 @@ exports.getJournalEntries = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -786,15 +799,18 @@ exports.getJournalEntry = async (req, res) => {
     if (!entry) {
       return res.status(404).json({ success: false, message: 'Journal voucher not found' });
     }
-    res.json({ success: true, data: entry });
+    res.json({ success: true, data: (await reportingEntries([entry]))[0] });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.createJournalEntry = async (req, res) => {
   try {
-    const { date, referenceNumber, memo, lines, currency } = req.body;
+    const { date, referenceNumber, memo, currency } = req.body;
+    if (currency && currency !== 'INR') throw math.invalid('Manual journals must use the INR reporting currency.');
+    const { lines } = math.amounts(req.body.lines);
+    if (date) parseSafeDate(date);
 
     if (!lines || lines.length < 2) {
       return res.status(400).json({ success: false, message: 'Journal entry requires at least 2 lines (debit & credit).' });
@@ -811,7 +827,7 @@ exports.createJournalEntry = async (req, res) => {
       totalCredit += c;
 
       const acc = await Account.findById(line.account);
-      if (!acc) {
+      if (!acc || acc.isActive === false) {
         return res.status(400).json({ success: false, message: `Invalid account ID specified in lines.` });
       }
 
@@ -827,7 +843,7 @@ exports.createJournalEntry = async (req, res) => {
       });
     }
 
-    if (Math.abs(totalDebit - totalCredit) > 0.05) {
+    if (Math.round(totalDebit * 100) !== Math.round(totalCredit * 100)) {
       return res.status(400).json({
         success: false,
         message: `Debit total (${totalDebit.toFixed(2)}) must equal Credit total (${totalCredit.toFixed(2)}).`
@@ -835,8 +851,7 @@ exports.createJournalEntry = async (req, res) => {
     }
 
     const year = new Date().getFullYear();
-    const count = await JournalEntry.countDocuments({ sourceModule: 'manual' });
-    const entryNumber = `JV-MAN-${year}/${String(count + 1).padStart(4, '0')}`;
+    const entryNumber = `JV-MAN-${year}/${randomBytes(6).toString('hex').toUpperCase()}`;
 
     const journal = await JournalEntry.create({
       entryNumber,
@@ -855,18 +870,21 @@ exports.createJournalEntry = async (req, res) => {
 
     res.status(201).json({ success: true, data: journal, message: `Journal entry ${entryNumber} posted successfully.` });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.updateJournalEntry = async (req, res) => {
   try {
     const { id } = req.params;
-    const { date, referenceNumber, memo, lines, currency } = req.body;
+    const { date, referenceNumber, memo, currency } = req.body;
+    if (currency && currency !== 'INR') throw math.invalid('Manual journals must use the INR reporting currency.');
+    const { lines } = math.amounts(req.body.lines);
+    if (date) parseSafeDate(date);
 
     const jv = await JournalEntry.findById(id);
     if (!jv) return res.status(404).json({ success: false, message: 'Journal voucher not found' });
-    if (['purchase_return', 'sales_return'].includes(jv.sourceModule)) return res.status(400).json({ success: false, message: 'Cancel the linked return to reverse this journal.' });
+    if (jv.sourceModule !== 'manual') return res.status(400).json({ success: false, message: 'Update or cancel the source document to change an automated journal.' });
 
     if (!lines || lines.length < 2) {
       return res.status(400).json({ success: false, message: 'Journal entry requires at least 2 lines (debit & credit).' });
@@ -883,7 +901,7 @@ exports.updateJournalEntry = async (req, res) => {
       totalCredit += c;
 
       const acc = await Account.findById(line.account);
-      if (!acc) {
+      if (!acc || acc.isActive === false) {
         return res.status(400).json({ success: false, message: 'Invalid account ID in line item.' });
       }
 
@@ -899,7 +917,7 @@ exports.updateJournalEntry = async (req, res) => {
       });
     }
 
-    if (Math.abs(totalDebit - totalCredit) > 0.05) {
+    if (Math.round(totalDebit * 100) !== Math.round(totalCredit * 100)) {
       return res.status(400).json({
         success: false,
         message: `Debit total (${totalDebit.toFixed(2)}) must equal Credit total (${totalCredit.toFixed(2)}).`
@@ -919,7 +937,7 @@ exports.updateJournalEntry = async (req, res) => {
 
     res.json({ success: true, data: jv, message: `Journal entry #${jv.entryNumber} updated successfully.` });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -927,14 +945,14 @@ exports.deleteJournalEntry = async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await JournalEntry.findById(id);
-    if (['purchase_return', 'sales_return'].includes(existing?.sourceModule)) return res.status(400).json({ success: false, message: 'Cancel the linked return to reverse this journal.' });
+    if (existing && existing.sourceModule !== 'manual') return res.status(400).json({ success: false, message: 'Update or cancel the source document to change an automated journal.' });
     const deleted = await JournalEntry.findByIdAndDelete(id);
     if (!deleted) {
       return res.status(404).json({ success: false, message: 'Journal voucher not found' });
     }
     res.json({ success: true, message: 'Journal voucher deleted successfully' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -943,6 +961,7 @@ exports.getGeneralLedger = async (req, res) => {
     await syncAllAutomatedJournals();
 
     const { accountId, startDate, endDate } = req.query;
+    math.range(startDate, endDate);
 
     if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
       return res.status(400).json({ success: false, message: 'Valid accountId required' });
@@ -955,12 +974,18 @@ exports.getGeneralLedger = async (req, res) => {
     if (startDate || endDate) {
       dateQuery.date = {};
       if (startDate) dateQuery.date.$gte = parseSafeDate(startDate);
-      if (endDate) dateQuery.date.$lte = parseSafeDate(endDate);
+      if (endDate) dateQuery.date.$lte = parseSafeDate(endDate, true);
     }
 
-    const entries = await JournalEntry.find(dateQuery).sort({ date: 1, createdAt: 1 });
+    const entries = await reportingEntries(await JournalEntry.find(dateQuery).sort({ date: 1, createdAt: 1 }));
 
-    let runningBalance = 0;
+    let openingBalance = 0;
+    if (startDate) {
+      const previous = await reportingEntries(await JournalEntry.find({ 'lines.account': account._id, status: 'posted', date: { $lt: parseSafeDate(startDate) } }));
+      for (const entry of previous) for (const line of entry.lines) if (String(line.account) === String(account._id)) openingBalance += ['asset', 'expense'].includes(account.type) ? line.debit - line.credit : line.credit - line.debit;
+    }
+    openingBalance = math.round(openingBalance);
+    let runningBalance = openingBalance;
     const ledgerLines = [];
 
     entries.forEach((entry) => {
@@ -991,13 +1016,13 @@ exports.getGeneralLedger = async (req, res) => {
       success: true,
       data: {
         account,
-        openingBalance: 0,
+        openingBalance,
         closingBalance: Math.round(runningBalance * 100) / 100,
         transactions: ledgerLines
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -1006,32 +1031,29 @@ exports.getTrialBalance = async (req, res) => {
     await syncAllAutomatedJournals();
 
     const { asOfDate } = req.query;
-    const dateLimit = asOfDate ? parseSafeDate(asOfDate) : new Date();
+    const dateLimit = asOfDate ? parseSafeDate(asOfDate, true) : new Date();
 
-    const accounts = await Account.find({ isActive: true }).sort({ code: 1 });
+    const accounts = await Account.find({}).sort({ code: 1 });
+    const entries = await reportingEntries(await JournalEntry.find({
+      status: 'posted', date: { $lte: dateLimit }
+    }));
+    const accountTotals = new Map();
+    for (const entry of entries) for (const line of entry.lines) {
+      const key = String(line.account?._id || line.account);
+      const totals = accountTotals.get(key) || { debit: 0, credit: 0 };
+      totals.debit += line.debit || 0;
+      totals.credit += line.credit || 0;
+      accountTotals.set(key, totals);
+    }
     const trialLines = [];
 
     let totalDebit = 0;
     let totalCredit = 0;
 
     for (const acc of accounts) {
-      const entries = await JournalEntry.find({
-        'lines.account': acc._id,
-        status: 'posted',
-        date: { $lte: dateLimit }
-      });
-
-      let netDebit = 0;
-      let netCredit = 0;
-
-      entries.forEach((entry) => {
-        entry.lines
-          .filter((l) => l.account.toString() === acc._id.toString())
-          .forEach((line) => {
-            netDebit += line.debit || 0;
-            netCredit += line.credit || 0;
-          });
-      });
+      const totals = accountTotals.get(String(acc._id)) || { debit: 0, credit: 0 };
+      const netDebit = totals.debit;
+      const netCredit = totals.credit;
 
       let debitBalance = 0;
       let creditBalance = 0;
@@ -1069,210 +1091,31 @@ exports.getTrialBalance = async (req, res) => {
         lines: trialLines,
         totalDebit: Math.round(totalDebit * 100) / 100,
         totalCredit: Math.round(totalCredit * 100) / 100,
-        isBalanced: Math.abs(totalDebit - totalCredit) < 0.05
+        isBalanced: Math.round(totalDebit * 100) === Math.round(totalCredit * 100)
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.getProfitLoss = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
-    const start = startDate ? parseSafeDate(startDate) : new Date(new Date().getFullYear(), 0, 1);
-    const end = endDate ? parseSafeDate(endDate) : new Date();
-
-    const [invoices, purchaseInvoices, journalExpenses] = await Promise.all([
-      Invoice.find({
-        date: { $gte: start, $lte: end },
-        status: { $ne: 'cancelled' }
-      }),
-      ConsolidatedInvoice.find({
-        createdAt: { $gte: start, $lte: end }
-      }),
-      JournalEntry.find({
-        date: { $gte: start, $lte: end },
-        status: 'posted'
-      }).populate('lines.account', 'type subType')
-    ]);
-
-    let domesticSales = 0;
-    let exportSales = 0;
-    let freightIncome = 0;
-    let insuranceIncome = 0;
-    let totalIncentives = 0;
-    let directMaterialsCOGS = 0;
-
-    invoices.forEach((inv) => {
-      const sub = Number(inv.subtotal) || 0;
-      const isExport = inv.type === 'international' || (inv.currency && inv.currency !== 'INR');
-      if (isExport) exportSales += sub;
-      else domesticSales += sub;
-
-      freightIncome += Number(inv.freight) || 0;
-      insuranceIncome += Number(inv.insurance) || 0;
-      totalIncentives += Number(inv.incentive) || 0;
-      directMaterialsCOGS += Number(inv.totalCost) || 0;
-    });
-
-    let procurementBills = 0;
-    purchaseInvoices.forEach((pi) => {
-      procurementBills += (Number(pi.subtotal) || 0) - (Number(pi.returnSubtotal) || 0);
-    });
-
-    if (directMaterialsCOGS === 0 && procurementBills > 0) {
-      directMaterialsCOGS = procurementBills;
-    }
-
-    // Apply returns in their posting period, including returns of older invoices.
-    journalExpenses.filter(je => je.sourceModule === 'sales_return').forEach(je => {
-      je.lines.forEach(line => {
-        const reversal = Number(line.debit || 0) - Number(line.credit || 0);
-        if (line.accountCode === '4000') domesticSales -= reversal;
-        if (line.accountCode === '4010') exportSales -= reversal;
-        if (line.accountCode === '5000') directMaterialsCOGS += reversal;
-      });
-    });
-    let manualOperatingExpenses = 0;
-    journalExpenses.forEach((je) => {
-      je.lines.forEach((l) => {
-        if (l.account?.type === 'expense' && l.account?.subType !== 'cost_of_goods_sold') {
-          manualOperatingExpenses += ((Number(l.debit) || 0) - (Number(l.credit) || 0));
-        }
-      });
-    });
-
-    const totalRevenue = domesticSales + exportSales + freightIncome + insuranceIncome;
-    const grossProfit = totalRevenue - directMaterialsCOGS;
-    const totalOperatingExpenses = totalIncentives + Math.max(0, manualOperatingExpenses);
-    const netProfit = grossProfit - totalOperatingExpenses;
-
-    res.json({
-      success: true,
-      data: {
-        period: { start, end },
-        revenue: {
-          domesticSales: Math.round(domesticSales * 100) / 100,
-          exportSales: Math.round(exportSales * 100) / 100,
-          freightIncome: Math.round(freightIncome * 100) / 100,
-          insuranceIncome: Math.round(insuranceIncome * 100) / 100,
-          totalRevenue: Math.round(totalRevenue * 100) / 100
-        },
-        cogs: {
-          directMaterials: Math.round(directMaterialsCOGS * 100) / 100,
-          totalCOGS: Math.round(directMaterialsCOGS * 100) / 100
-        },
-        grossProfit: Math.round(grossProfit * 100) / 100,
-        grossMargin: totalRevenue > 0 ? ((grossProfit / totalRevenue) * 100).toFixed(2) : '0.00',
-        expenses: {
-          salesIncentives: Math.round(totalIncentives * 100) / 100,
-          manualOperatingExpenses: Math.round(manualOperatingExpenses * 100) / 100,
-          totalExpenses: Math.round(totalOperatingExpenses * 100) / 100
-        },
-        netProfit: Math.round(netProfit * 100) / 100,
-        netMargin: totalRevenue > 0 ? ((netProfit / totalRevenue) * 100).toFixed(2) : '0.00'
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    math.range(req.query.startDate, req.query.endDate);
+    const start = req.query.startDate ? parseSafeDate(req.query.startDate) : new Date(Date.UTC(new Date().getFullYear(), 0, 1));
+    const end = req.query.endDate ? parseSafeDate(req.query.endDate, true) : new Date();
+    await syncAllAutomatedJournals();
+    const entries = await JournalEntry.find({ status: 'posted', date: { $gte: start, $lte: end } }).populate('lines.account', 'code name type subType');
+    res.json({ success: true, data: { period: { start, end }, ...math.pnl(await reportingEntries(entries)) } });
+  } catch (error) { res.status(error.status || 500).json({ success: false, message: error.message }); }
 };
-
 exports.getBalanceSheet = async (req, res) => {
   try {
-    const { asOfDate } = req.query;
-    const dateLimit = asOfDate ? parseSafeDate(asOfDate) : new Date();
-    dateLimit.setHours(23, 59, 59, 999);
-
-    const [invoices, purchases, liveInventoryValue, journalLines] = await Promise.all([
-      Invoice.find({ date: { $lte: dateLimit }, status: { $ne: 'cancelled' } }),
-      ConsolidatedInvoice.find({ createdAt: { $lte: dateLimit } }),
-      getLiveInventoryValuation(),
-      JournalEntry.find({ date: { $lte: dateLimit }, status: 'posted' }).populate('lines.account', 'code name type subType')
-    ]);
-
-    const accountsReceivable = invoices.reduce((sum, inv) => sum + (Number(inv.dueAmount) || 0), 0);
-    const accountsPayable = purchases.reduce((sum, pi) => sum + (Number(pi.remainingAmount) || 0), 0);
-
-    const totalCashCollected = invoices.reduce((sum, inv) => sum + (Number(inv.paidAmount) || 0), 0);
-    const totalVendorPaid = purchases.reduce((sum, pi) => sum + (Number(pi.paidAmount) || 0), 0);
-
-    let journalBankAdjustments = 0;
-    let fixedAssetsValuation = 0;
-    let capitalAmount = 0;
-
-    journalLines.forEach((je) => {
-      je.lines.forEach((l) => {
-        if (l.account?.subType === 'bank' || l.account?.subType === 'cash') {
-          journalBankAdjustments += ((Number(l.debit) || 0) - (Number(l.credit) || 0));
-        }
-        if (l.account?.subType === 'fixed_asset') {
-          fixedAssetsValuation += ((Number(l.debit) || 0) - (Number(l.credit) || 0));
-        }
-        if (l.account?.subType === 'equity') {
-          capitalAmount += ((Number(l.credit) || 0) - (Number(l.debit) || 0));
-        }
-      });
-    });
-
-    const cashAndBank = Math.max(0, (totalCashCollected - totalVendorPaid + journalBankAdjustments));
-    const inventoryValuation = liveInventoryValue || 0;
-
-    const supplierCredits = purchases.reduce((sum, pi) => sum + Number(pi.supplierCredit || 0), 0);
-    const totalCurrentAssets = cashAndBank + accountsReceivable + inventoryValuation + supplierCredits;
-    const totalAssets = totalCurrentAssets + Math.max(0, fixedAssetsValuation);
-
-    const totalOutputGst = invoices.reduce((sum, inv) => sum + (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0), 0);
-    const totalInputGst = purchases.reduce((sum, pi) => sum + (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0), 0);
-    const outputGstPayable = Math.max(0, totalOutputGst - totalInputGst);
-
-    const customerCredits = invoices.reduce((sum, inv) => sum + Number(inv.customerCredit || 0), 0);
-    const totalCurrentLiabilities = accountsPayable + outputGstPayable + customerCredits;
-    const totalLiabilities = totalCurrentLiabilities;
-
-    const ownersEquity = Math.max(0, capitalAmount);
-    const retainedEarnings = totalAssets - totalLiabilities - ownersEquity;
-    const totalEquity = ownersEquity + retainedEarnings;
-
-    res.json({
-      success: true,
-      data: {
-        asOfDate: dateLimit,
-        assets: {
-          currentAssets: {
-            cashAndBank: Math.round(cashAndBank * 100) / 100,
-            accountsReceivable: Math.round(accountsReceivable * 100) / 100,
-            inventory: Math.round(inventoryValuation * 100) / 100,
-            supplierCredits: Math.round(supplierCredits * 100) / 100,
-            totalCurrent: Math.round(totalCurrentAssets * 100) / 100
-          },
-          fixedAssets: {
-            equipmentAndVehicles: Math.round(fixedAssetsValuation * 100) / 100,
-            totalFixed: Math.round(fixedAssetsValuation * 100) / 100
-          },
-          totalAssets: Math.round(totalAssets * 100) / 100
-        },
-        liabilities: {
-          currentLiabilities: {
-            accountsPayable: Math.round(accountsPayable * 100) / 100,
-            taxPayable: Math.round(outputGstPayable * 100) / 100,
-            customerCredits: Math.round(customerCredits * 100) / 100,
-            totalCurrent: Math.round(totalCurrentLiabilities * 100) / 100
-          },
-          totalLiabilities: Math.round(totalLiabilities * 100) / 100
-        },
-        equity: {
-          capital: Math.round(ownersEquity * 100) / 100,
-          retainedEarnings: Math.round(retainedEarnings * 100) / 100,
-          totalEquity: Math.round(totalEquity * 100) / 100
-        },
-        isBalanced: Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.05
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const asOfDate = req.query.asOfDate ? parseSafeDate(req.query.asOfDate, true) : new Date();
+    await syncAllAutomatedJournals();
+    const entries = await JournalEntry.find({ status: 'posted', date: { $lte: asOfDate } }).populate('lines.account', 'code name type subType');
+    res.json({ success: true, data: { asOfDate, ...math.balanceSheet(await reportingEntries(entries)) } });
+  } catch (error) { res.status(error.status || 500).json({ success: false, message: error.message }); }
 };
 
 exports.getAccountingDashboard = async (req, res) => {
@@ -1280,7 +1123,7 @@ exports.getAccountingDashboard = async (req, res) => {
     await syncAllAutomatedJournals();
 
     const [invoices, purchases, recentJournals, recentInvoices, liveStockValuation] = await Promise.all([
-      Invoice.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }),
+      Invoice.find({ status: { $nin: ['cancelled', 'draft'] } }).sort({ createdAt: -1 }),
       ConsolidatedInvoice.find().sort({ createdAt: -1 }),
       JournalEntry.find().sort({ date: -1, createdAt: -1 }).limit(8).populate('lines.account', 'code name'),
       Invoice.find().sort({ createdAt: -1 }).limit(6),
@@ -1294,11 +1137,12 @@ exports.getAccountingDashboard = async (req, res) => {
     let totalCustomerPaid = 0;
 
     invoices.forEach((inv) => {
-      totalRevenue += (Number(inv.total) || 0) - (Number(inv.returnCredit) || 0);
-      totalReceivables += Number(inv.dueAmount) || 0;
-      totalCustomerPaid += Number(inv.paidAmount) || 0;
+      const rate = math.exchangeRate(inv);
+      totalRevenue += ((Number(inv.total) || 0) - (Number(inv.returnCredit) || 0)) * rate;
+      totalReceivables += (Number(inv.dueAmount) || 0) * rate;
+      totalCustomerPaid += (Number(inv.paidAmount) || 0) * rate;
       totalIncentivePaid += Number(inv.incentive) || 0;
-      totalTaxCollected += (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0);
+      totalTaxCollected += ((Number(inv.tax) || 0) - (Number(inv.returnTax) || 0)) * rate;
     });
 
     let totalPayables = 0;
@@ -1307,10 +1151,11 @@ exports.getAccountingDashboard = async (req, res) => {
     let totalInputTax = 0;
 
     purchases.forEach((pi) => {
-      totalProcurementSpend += (Number(pi.grandTotal) || 0) - (Number(pi.returnCredit) || 0);
-      totalPayables += Number(pi.remainingAmount) || 0;
-      totalVendorPaid += Number(pi.paidAmount) || 0;
-      totalInputTax += (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0);
+      const rate = math.exchangeRate(pi);
+      totalProcurementSpend += ((Number(pi.grandTotal) || 0) - (Number(pi.returnCredit) || 0)) * rate;
+      totalPayables += (Number(pi.remainingAmount) || 0) * rate;
+      totalVendorPaid += (Number(pi.paidAmount) || 0) * rate;
+      totalInputTax += ((Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0)) * rate;
     });
 
     const netCashFlow = totalCustomerPaid - totalVendorPaid;
@@ -1319,17 +1164,17 @@ exports.getAccountingDashboard = async (req, res) => {
       success: true,
       data: {
         kpi: {
-          totalRevenue: Math.round(totalRevenue),
-          totalReceivables: Math.round(totalReceivables),
-          totalPayables: Math.round(totalPayables),
-          procurementSpend: Math.round(totalProcurementSpend),
-          taxCollected: Math.round(totalTaxCollected),
-          taxPaidOnPurchases: Math.round(totalInputTax),
-          incentivesDisbursed: Math.round(totalIncentivePaid),
-          inventoryAssetValue: Math.round(liveStockValuation),
-          totalCustomerPaid: Math.round(totalCustomerPaid),
-          totalVendorPaid: Math.round(totalVendorPaid),
-          netCashFlow: Math.round(netCashFlow)
+          totalRevenue: math.round(totalRevenue),
+          totalReceivables: math.round(totalReceivables),
+          totalPayables: math.round(totalPayables),
+          procurementSpend: math.round(totalProcurementSpend),
+          taxCollected: math.round(totalTaxCollected),
+          taxPaidOnPurchases: math.round(totalInputTax),
+          incentivesDisbursed: math.round(totalIncentivePaid),
+          inventoryAssetValue: math.round(liveStockValuation),
+          totalCustomerPaid: math.round(totalCustomerPaid),
+          totalVendorPaid: math.round(totalVendorPaid),
+          netCashFlow: math.round(netCashFlow)
         },
         recentInvoices,
         recentJournals,
@@ -1337,23 +1182,24 @@ exports.getAccountingDashboard = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
 exports.getTaxAndFinancialReports = async (req, res) => {
   try {
     const [invoices, purchases] = await Promise.all([
-      Invoice.find({ status: { $ne: 'cancelled' } }),
+      Invoice.find({ status: { $nin: ['cancelled', 'draft'] } }),
       ConsolidatedInvoice.find()
     ]);
 
     let outputGst = 0, cgstOutput = 0, sgstOutput = 0, igstOutput = 0;
     invoices.forEach((inv) => {
-      const tax = (Number(inv.tax) || 0) - (Number(inv.returnTax) || 0);
+      const rate = math.exchangeRate(inv);
+      const tax = math.round(((Number(inv.tax) || 0) - (Number(inv.returnTax) || 0)) * rate);
       outputGst += tax;
       const place = (inv.placeOfSupply || '').toLowerCase();
-      if (place.includes('delhi') || place.includes('07') || inv.taxType === 'cgst_sgst') {
+      if (inv.taxType === 'cgst_sgst') {
         cgstOutput += tax / 2;
         sgstOutput += tax / 2;
       } else {
@@ -1363,21 +1209,23 @@ exports.getTaxAndFinancialReports = async (req, res) => {
 
     let inputGst = 0;
     purchases.forEach((pi) => {
-      inputGst += (Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0);
+      const rate = math.exchangeRate(pi);
+      inputGst += ((Number(pi.totalTax) || 0) - (Number(pi.returnTax) || 0)) * rate;
     });
 
     const today = new Date();
     const receivablesAging = { current: 0, overdue30: 0, overdue60: 0, critical90: 0 };
 
     invoices.forEach((inv) => {
-      const due = Number(inv.dueAmount) || 0;
+      const rate = math.exchangeRate(inv);
+      const due = math.round((Number(inv.dueAmount) || 0) * rate);
       if (due > 0) {
         const invoiceDueDate = inv.dueDate ? parseSafeDate(inv.dueDate) : parseSafeDate(inv.date);
         const diffDays = Math.floor((today - invoiceDueDate) / (1000 * 60 * 60 * 24));
 
-        if (diffDays <= 0 || diffDays <= 30) receivablesAging.current += due;
-        else if (diffDays <= 60) receivablesAging.overdue30 += due;
-        else if (diffDays <= 90) receivablesAging.overdue60 += due;
+        if (diffDays <= 0) receivablesAging.current += due;
+        else if (diffDays <= 30) receivablesAging.overdue30 += due;
+        else if (diffDays <= 60) receivablesAging.overdue60 += due;
         else receivablesAging.critical90 += due;
       }
     });
@@ -1385,14 +1233,15 @@ exports.getTaxAndFinancialReports = async (req, res) => {
     const payablesAging = { current: 0, overdue30: 0, overdue60: 0, critical90: 0 };
 
     purchases.forEach((pi) => {
-      const due = Number(pi.remainingAmount) || 0;
+      const rate = math.exchangeRate(pi);
+      const due = math.round((Number(pi.remainingAmount) || 0) * rate);
       if (due > 0) {
         const dueDate = pi.dueDate ? parseSafeDate(pi.dueDate) : parseSafeDate(pi.invoiceDate || pi.createdAt);
         const diffDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
 
-        if (diffDays <= 0 || diffDays <= 30) payablesAging.current += due;
-        else if (diffDays <= 60) payablesAging.overdue30 += due;
-        else if (diffDays <= 90) payablesAging.overdue60 += due;
+        if (diffDays <= 0) payablesAging.current += due;
+        else if (diffDays <= 30) payablesAging.overdue30 += due;
+        else if (diffDays <= 60) payablesAging.overdue60 += due;
         else payablesAging.critical90 += due;
       }
     });
@@ -1412,16 +1261,16 @@ exports.getTaxAndFinancialReports = async (req, res) => {
         },
         receivablesAging: {
           ...receivablesAging,
-          total: Math.round(receivablesAging.current + receivablesAging.overdue30 + receivablesAging.overdue60 + receivablesAging.critical90)
+          total: math.round(receivablesAging.current + receivablesAging.overdue30 + receivablesAging.overdue60 + receivablesAging.critical90)
         },
         payablesAging: {
           ...payablesAging,
-          total: Math.round(payablesAging.current + payablesAging.overdue30 + payablesAging.overdue60 + payablesAging.critical90)
+          total: math.round(payablesAging.current + payablesAging.overdue30 + payablesAging.overdue60 + payablesAging.critical90)
         }
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || (['ValidationError', 'CastError'].includes(error.name) ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 

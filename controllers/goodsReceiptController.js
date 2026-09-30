@@ -595,7 +595,7 @@ exports.createGRN = async (req, res) => {
             supDoc.companyName || supDoc.name || supDoc.supplierName || '';
         }
       } catch (err) {
-        console.log('Supplier DB Lookup Error:', err.message);
+        console.error('Supplier DB Lookup Error:', err.message);
       }
     }
     if (!finalSupplierName) finalSupplierName = 'Vendor / Supplier';

@@ -9,7 +9,7 @@ const {
   updateSupplier,
   deleteSupplier
 } = require('../controllers/supplierController');
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const { getVendorLedger } = require('../controllers/vendorLedgerController');
 
 // Complete Indian State & UT Codes Map
@@ -182,8 +182,8 @@ router.get('/verify-gst/:gstin', async (req, res) => {
 router.get('/', getSuppliers);
 router.get('/:id/ledger', getVendorLedger);
 router.get('/:id', getSupplier);
-router.post('/', restrictTo('admin', 'manager'), supplierValidation, createSupplier);
-router.put('/:id', restrictTo('admin', 'manager'), supplierValidation, updateSupplier);
-router.delete('/:id', restrictTo('admin'), deleteSupplier);
+router.post('/', authorize(), supplierValidation, createSupplier);
+router.put('/:id', authorize(), supplierValidation, updateSupplier);
+router.delete('/:id', authorize(), deleteSupplier);
 
 module.exports = router;

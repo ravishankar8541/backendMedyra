@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 
 const {
   getInventoryStats,
@@ -43,17 +43,17 @@ router.get('/categories', protect, getInventoryByCategory);
 // ============================================
 router.route('/')
   .get(protect, getAllInventory)
-  .post(protect, restrictTo('admin', 'manager'), createInventoryValidation, createInventory);
+  .post(protect, authorize(), createInventoryValidation, createInventory);
 
 router.route('/:id')
   .get(protect, getInventoryItem)
-  .put(protect, restrictTo('admin', 'manager'), updateInventory)
-  .delete(protect, restrictTo('admin'), deleteInventory);
+  .put(protect, authorize(), updateInventory)
+  .delete(protect, authorize(), deleteInventory);
 
 // ============================================
 // STOCK MOVEMENT ROUTES
 // ============================================
-router.post('/:id/movement', protect, restrictTo('admin', 'manager'), movementValidation, addStockMovement);
+router.post('/:id/movement', protect, authorize(), movementValidation, addStockMovement);
 router.get('/:id/movements', protect, getStockMovements);
 
 module.exports = router;

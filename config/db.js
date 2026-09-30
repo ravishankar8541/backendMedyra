@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const dbConnection = async () => {
   try {
-    console.log("Mongo URL:", process.env.MONGOURL); // Temporary debug
+     // Temporary debug
 
     await mongoose.connect(process.env.MONGOURL);
 

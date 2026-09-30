@@ -21,7 +21,7 @@ const PackageProductSchema = new mongoose.Schema({
   }, // e.g. "AMBILON - 50"
   description: { 
     type: String, 
-    default: '' 
+    default: ''
   }, // e.g. "Amphotericin - 50 mg Liposomal Injection"
   quantity: { 
     type: String, 
@@ -33,19 +33,19 @@ const PackageProductSchema = new mongoose.Schema({
   }, // e.g. "5*10", "10*10", "1*100", "30*10", "20*4", "1*36", "2*42+30"
   batchNo: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   mfgDate: { 
     type: String, 
-    default: '' 
+    default: ''
   }, // e.g. "Dec-25"
   expDate: { 
     type: String, 
-    default: '' 
+    default: ''
   }, // e.g. "Nov-27"
   grossWeight: { 
     type: String, 
-    default: '' 
+    default: ''
   }, // e.g. "9.5"
   manufacturer: { 
     type: String, 
@@ -57,7 +57,7 @@ const PackageProductSchema = new mongoose.Schema({
   },
   mfgLicNo: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   hsn: { 
     type: String, 
@@ -89,11 +89,11 @@ const SingleBoxSchema = new mongoose.Schema({
   },
   netWeight: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   grossWeight: { 
     type: String, 
-    default: '' 
+    default: ''
   }, // Carton total gross weight e.g. "9.5", "12.3"
   dimension: { 
     type: String, 
@@ -110,19 +110,19 @@ const PackageSchema = new mongoose.Schema({
   },
   invoiceNo: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   invoiceDate: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   performaInvoiceNo: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   buyerReference: { 
     type: String, 
-    default: 'PI-172, PI-173' 
+    default: ''
   },
   countryOfOrigin: { 
     type: String, 
@@ -142,25 +142,25 @@ const PackageSchema = new mongoose.Schema({
   },
   destinationCountry: { 
     type: String, 
-    default: 'Douala, Cameroon' 
+    default: ''
   },
   destination: { 
     type: String, 
-    default: 'Douala, Cameroon' 
+    default: ''
   },
 
   // Export Header Summaries
   totalVolumetricWeight: { 
     type: String, 
-    default: '404.00 KG' 
+    default: ''
   },
   totalNetWeight: { 
     type: String, 
-    default: '273.00 KG' 
+    default: ''
   },
   totalGrossWeight: { 
     type: String, 
-    default: '308.00 KG' 
+    default: ''
   },
   totalBoxesCount: { 
     type: Number, 
@@ -172,7 +172,7 @@ const PackageSchema = new mongoose.Schema({
   },
   coldChainBoxes: { 
     type: String, 
-    default: '06' 
+    default: ''
   },
   boxNo: { 
     type: String, 
@@ -190,11 +190,11 @@ const PackageSchema = new mongoose.Schema({
   },
   customerPhone: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   notifyParty: {
     type: String,
-    default: 'To The Order Of:\nInvoice raised to,\nAppro Afrik'
+    default: ''
   },
 
   // Packaging Mode & Boxes
@@ -241,7 +241,7 @@ const PackageSchema = new mongoose.Schema({
   },
   completedDate: { 
     type: String, 
-    default: '' 
+    default: ''
   },
 
   labelGenerated: { 
@@ -261,11 +261,11 @@ const PackageSchema = new mongoose.Schema({
 
   notes: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   trackingNumber: { 
     type: String, 
-    default: '' 
+    default: ''
   },
   assignedTo: { 
     type: String, 

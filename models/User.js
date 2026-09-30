@@ -22,8 +22,8 @@ const UserSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['admin', 'manager', 'accountant', 'telecaller', 'delivery_agent', 'staff'],
-    default: 'staff'
+    enum: ['admin', 'accountant', 'sales'],
+    default: 'sales'
   },
   phone: {
     type: String,
@@ -58,6 +58,13 @@ const UserSchema = new mongoose.Schema({
   },
   profileImage: String,
   permissions: [String],
+  accessVersion: Number,
+  authVersion: { type: Number, default: 0 },
+  passwordResetHash: { type: String, select: false },
+  passwordResetExpires: { type: Date, select: false },
+  passwordResetRequestedAt: { type: Date, select: false },
+  accessUpdatedAt: Date,
+  accessUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   twoFactorEnabled: {
     type: Boolean,
     default: false
@@ -146,10 +153,12 @@ const UserSchema = new mongoose.Schema({
 });
 
 // ✅ Password hashing middleware
-UserSchema.pre('save', function() {
+UserSchema.pre('save', async function() {
   if (this.isModified('password')) {
-    const salt = bcrypt.genSaltSync(12);
-    this.password = bcrypt.hashSync(this.password, salt);
+    this.passwordResetHash = undefined;
+    this.passwordResetExpires = undefined;
+    if (!this.isNew) this.authVersion = (this.authVersion || 0) + 1;
+    this.password = await bcrypt.hash(this.password, 12);
     this.passwordChangedAt = new Date();
   }
 });

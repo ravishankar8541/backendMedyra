@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const {
   createProduct,
   getProducts,
@@ -22,31 +22,31 @@ const {
 // Get all products & Create new product
 router.route('/')
   .get(protect, getProducts)
-  .post(protect, restrictTo('admin', 'manager'), createProduct);
+  .post(protect, authorize(), createProduct);
 
 // Get, Update, Delete single product
 router.route('/:id')
   .get(protect, getProduct)
-  .put(protect, restrictTo('admin', 'manager'), updateProduct)
-  .delete(protect, restrictTo('admin'), deleteProduct);
+  .put(protect, authorize(), updateProduct)
+  .delete(protect, authorize(), deleteProduct);
 
 // ============================================
 // STOCK MANAGEMENT ROUTES
 // ============================================
 
 // Add batch to product
-router.post('/:id/batch', protect, restrictTo('admin', 'manager'), addBatch);
+router.post('/:id/batch', protect, authorize(), addBatch);
 
 
 // ✅ UPDATE EXISTING BATCH (Add/Remove stock)
-router.put('/:id/batch/:batchIndex', protect, restrictTo('admin', 'manager'), updateBatch);
+router.put('/:id/batch/:batchIndex', protect, authorize(), updateBatch);
 
 // Remove batch stock
-router.delete('/:id/batch', protect, restrictTo('admin', 'manager'), removeBatchStock);
+router.delete('/:id/batch', protect, authorize(), removeBatchStock);
 
-router.delete('/:id/batch/:batchIndex', protect, restrictTo('admin', 'manager'), deleteBatch);
+router.delete('/:id/batch/:batchIndex', protect, authorize(), deleteBatch);
 // Update stock
-router.patch('/:id/stock', protect, restrictTo('admin', 'manager'), updateStock);
+router.patch('/:id/stock', protect, authorize(), updateStock);
 
 // Get low stock products
 router.get('/low-stock', protect, getLowStockProducts);

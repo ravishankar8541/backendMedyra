@@ -78,6 +78,11 @@ const DeliverySchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  confirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  proof: {
+    name: String, mimeType: String, size: Number, uploadedAt: Date,
+    data: { type: Buffer, select: false },
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

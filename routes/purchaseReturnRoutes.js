@@ -1,7 +1,7 @@
 // routes/purchaseReturnRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const multer = require('multer');
 const { sendDebitNoteEmail } = require('../controllers/debitNoteEmailController');
 const upload = multer({ storage: multer.memoryStorage(), limits: {
@@ -25,7 +25,7 @@ router.get('/public-view/:id', getPublicDebitNoteView);
 
 router.use(protect);
 
-router.post('/:id/send-email', restrictTo('admin', 'manager'), (req, res, next) => {
+router.post('/:id/send-email', authorize(), (req, res, next) => {
   upload.single('pdf')(req, res, error => {
     if (!error) return next();
     return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
@@ -36,19 +36,19 @@ router.post('/:id/send-email', restrictTo('admin', 'manager'), (req, res, next) 
   });
 }, sendDebitNoteEmail);
 
-router.get('/source/:invoiceId', restrictTo('admin', 'manager'), getReturnSource);
-router.post('/:id/cancel', restrictTo('admin', 'manager'), cancelPurchaseReturn);
-router.post('/:id/replacement', restrictTo('admin', 'manager'), receiveReplacement);
+router.get('/source/:invoiceId', authorize(), getReturnSource);
+router.post('/:id/cancel', authorize(), cancelPurchaseReturn);
+router.post('/:id/replacement', authorize(), receiveReplacement);
 
 router
   .route('/')
-  .post(restrictTo('admin', 'manager'), createPurchaseReturn)
+  .post(authorize(), createPurchaseReturn)
   .get(getPurchaseReturns);
 
 router
   .route('/:id')
   .get(getPurchaseReturn)
-  .put(restrictTo('admin', 'manager'), updatePurchaseReturn)
-  .delete(restrictTo('admin', 'manager'), deletePurchaseReturn);
+  .put(authorize(), updatePurchaseReturn)
+  .delete(authorize(), deletePurchaseReturn);
 
 module.exports = router;

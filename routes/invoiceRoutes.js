@@ -12,7 +12,7 @@ const {
   addInvoicePayment,
   updateInvoiceItems
 } = require('../controllers/invoiceController');
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 
 const invoiceShare = require('../controllers/invoiceShareController');
 const multer = require('multer');
@@ -46,7 +46,7 @@ router.route('/')
 router.route('/:id')
   .get(protect, getInvoice)
   .put(protect, transaction(updateInvoiceItems))
-  .delete(protect, restrictTo('admin'), transaction(deleteInvoice));
+  .delete(protect, authorize(), transaction(deleteInvoice));
 
 router.put('/:id/status', protect, transaction(updateInvoiceStatus));
 

@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const { randomBytes } = require('node:crypto');
 const mongoose = require('mongoose');
 const { isEmail } = require('validator');
@@ -10,7 +11,7 @@ async function validate(req) {
   const invoice = await Invoice.findById(req.params.id);
   if (!invoice) fail('Invoice not found.', 404);
   const uid = String(req.user?._id || req.user?.id || '');
-  if (!['admin', 'manager', 'accountant'].includes(req.user?.role) && ![invoice.createdBy, invoice.assignedTo].some(id => String(id || '') === uid)) fail('You cannot share this invoice.', 403);
+  if (!can(req.user, 'invoices', 'all_records') && ![invoice.createdBy, invoice.assignedTo].some(id => String(id || '') === uid)) fail('You cannot share this invoice.', 403);
   if (!req.file?.buffer || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') fail('A valid invoice PDF is required.');
   return { invoice, number: invoice.invoiceNumber };
 }

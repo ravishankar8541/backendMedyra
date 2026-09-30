@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const { randomBytes } = require('node:crypto');
 const mongoose = require('mongoose');
 const { isEmail } = require('validator');
@@ -10,7 +11,7 @@ async function validate(req) {
   const lead = await Lead.findById(req.params.id);
   if (!lead) fail('Client not found.', 404);
   const uid = String(req.user?._id || req.user?.id || '');
-  if (!['admin', 'manager'].includes(req.user?.role) && ![lead.createdBy, lead.assignedTo].some(id => String(id || '') === uid)) fail('You cannot share this client’s proforma.', 403);
+  if (!can(req.user, 'sales', 'all_records') && ![lead.createdBy, lead.assignedTo].some(id => String(id || '') === uid)) fail('You cannot share this client’s proforma.', 403);
   const number = req.body.proformaNumber;
   if (typeof number !== 'string' || ![...(lead.proformas || []), lead.proforma].filter(Boolean).some(p => p.number === number)) fail('Proforma not found for this client.', 404);
   if (!req.file?.buffer || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') fail('A valid proforma PDF is required.');

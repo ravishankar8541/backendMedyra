@@ -8,6 +8,8 @@ node_modules/
 npm-debug.log
 yarn-error.log
 coverage/
+/tmp/
+/grn-test-results.txt
 .nyc_output/
 .DS_Store
 *.log

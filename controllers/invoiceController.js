@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 // controllers/invoiceController.js
 const Invoice = require('../models/Invoice');
 const Lead = require('../models/Lead');
@@ -445,6 +446,7 @@ exports.getInvoices = async (req, res) => {
     const { page = 1, limit = 100, status, type, search } = req.query;
 
     const query = {};
+    if (!can(req.user, 'invoices', 'all_records')) query.$and = [{ $or: [{ createdBy: req.user.id || req.user._id }, { assignedTo: req.user.id || req.user._id }] }];
     if (status && status !== 'all') query.status = status;
     if (type && type !== 'all') query.type = type;
     if (search) {

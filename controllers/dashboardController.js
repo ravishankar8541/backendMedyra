@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const Lead = require('../models/Lead');
 const Followup = require('../models/FollowUp');
 const Revenue = require('../models/Revenue');
@@ -7,7 +8,7 @@ const Revenue = require('../models/Revenue');
 // ============================================
 exports.getOverview = async (req, res) => {
   try {
-    const query = req.user.role === 'telecaller'
+    const query = !can(req.user, 'sales', 'all_records')
       ? { assignedTo: req.user.id }
       : {};
 
@@ -115,7 +116,7 @@ exports.getOverview = async (req, res) => {
 // ============================================
 exports.getPerformance = async (req, res) => {
   try {
-    const query = req.user.role === 'telecaller'
+    const query = !can(req.user, 'sales', 'all_records')
       ? { assignedTo: req.user.id }
       : {};
 

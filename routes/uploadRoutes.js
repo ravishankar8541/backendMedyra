@@ -1,7 +1,7 @@
 // routes/uploadRoutes.js
 const express = require('express');
 const router = express.Router();
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const { upload, uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
 // ============================================
@@ -16,7 +16,7 @@ router.post('/image', protect, upload.single('image'), async (req, res) => {
       });
     }
 
-    console.log('📸 Uploading single image:', req.file.originalname);
+    
 
     const result = await uploadToCloudinary(req.file.path);
     
@@ -50,7 +50,7 @@ router.post('/images', protect, upload.array('images', 10), async (req, res) => 
       });
     }
 
-    console.log(`📸 Uploading ${req.files.length} images`);
+    
 
     const uploadedImages = [];
     for (const file of req.files) {

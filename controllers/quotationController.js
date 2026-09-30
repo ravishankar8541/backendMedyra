@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 // controllers/quotationController.js - COMPLETE WORKING VERSION
 
 const Quotation = require('../models/Quotation');
@@ -8,7 +9,7 @@ const Product = require('../models/Product');
 
 exports.createQuotation = async (req, res) => {
   try {
-    console.log('📝 Creating quotation...');
+    
 
     const {
       leadId,
@@ -196,7 +197,7 @@ exports.getQuotations = async (req, res) => {
     if (leadId) query.leadId = leadId;
     
     // Telecaller sees only their quotations
-    if (req.user.role === 'telecaller') {
+    if (!can(req.user, 'sales', 'all_records')) {
       query.createdBy = req.user.id;
     }
 
@@ -294,7 +295,7 @@ exports.updateQuotationStatus = async (req, res) => {
     }
 
     // Authorization
-    if (req.user.role === 'telecaller' &&
+    if (!can(req.user, 'sales', 'all_records') &&
         quotation.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
@@ -361,7 +362,7 @@ exports.deleteQuotation = async (req, res) => {
       });
     }
 
-    if (req.user.role === 'telecaller' &&
+    if (!can(req.user, 'sales', 'all_records') &&
         quotation.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }

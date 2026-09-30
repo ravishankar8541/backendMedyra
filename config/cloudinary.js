@@ -14,11 +14,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-console.log('☁️ Cloudinary Config:', {
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || '❌ MISSING',
-  api_key: process.env.CLOUDINARY_API_KEY ? '✅ SET' : '❌ MISSING',
-  api_secret: process.env.CLOUDINARY_API_SECRET ? '✅ SET' : '❌ MISSING'
-});
+
 
 // Ensure uploads/temp directory exists
 const ensureTempDir = () => {
@@ -64,7 +60,7 @@ const upload = multer({
 // Upload to Cloudinary function
 const uploadToCloudinary = async (filePath, folder = 'medyra/products') => {
   try {
-    console.log('📤 Uploading to Cloudinary:', filePath);
+    
     
     if (!fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -78,7 +74,7 @@ const uploadToCloudinary = async (filePath, folder = 'medyra/products') => {
       ]
     });
     
-    console.log('✅ Cloudinary upload successful:', result.secure_url);
+    
     
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);

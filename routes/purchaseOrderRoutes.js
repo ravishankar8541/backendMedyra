@@ -11,6 +11,7 @@ const upload = multer({
 
 // 🌐 Public PO View route (WhatsApp direct view bina auth)
 router.get('/public-view/:id', purchaseOrderController.getPublicPOView);
+router.use(require('../middleware/auth').protect);
 
 // Email Route
 router.post('/send-email', (req, res, next) => {

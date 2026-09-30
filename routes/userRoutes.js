@@ -9,12 +9,13 @@ const {
   updateUserStatus,
   resetPassword
 } = require('../controllers/userController');
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 
 router.use(protect);
-router.use(restrictTo('admin'));
+router.use(authorize());
 
 router.get('/', getUsers);
+router.post('/', require('../controllers/userController').createUser);
 router.get('/:id', getUser);
 router.put('/:id', updateUser);
 router.delete('/:id', deleteUser);

@@ -11,7 +11,7 @@ function html(items) {
 test('purchase PDF groups batch quantities while preserving rates, dates, totals and signature', () => {
  const items = [
   { productId: 'p1', purchaseOrderItemId: 'line1', productName: 'Cetirizine 10mg Tablets', acceptedQty: 3, unitPrice: 50, batchNumber: 'C-2026-01', mfgDate: '2026-09-29', expDate: '2027-09-29' },
-  { productId: 'p1', purchaseOrderItemId: 'line1', productName: 'Cetirizine 10mg Tablets', acceptedQty: 2, unitPrice: 50, batchNumber: 'C-2026-02', mfgDate: '2026-09-30', expDate: '2027-09-30' },
+  { productId: 'p1', purchaseOrderItemId: 'line2', productName: 'Cetirizine 10mg Tablets', acceptedQty: 2, unitPrice: 50, batchNumber: 'C-2026-02', mfgDate: '2026-09-30', expDate: '2027-09-30' },
  ];
  const original = jsPDF.API.autoTable;
  let table;
@@ -28,8 +28,15 @@ test('purchase PDF groups batch quantities while preserving rates, dates, totals
   fs.writeFileSync('tmp/purchase-batch-qa/grouped.pdf', Buffer.from(pdf.output('arraybuffer')));
   const different = [...items, { ...items[1], unitPrice: 55 }];
   buildPurchaseInvoicePdf(html(different), { currency: 'INR', items: different });
-  assert.equal(table.body.length, 2);
-  assert.equal(table.body[1][10], '110.00');
+  assert.equal(table.body.length, 1);
+  assert.equal(table.body[0][10], '360.00');
+  assert.deepEqual(table.body[0][8].split('\n').filter(Boolean), ['50.00', '50.00', '55.00']);
+  const sample = items.map((item, i) => ({ ...item, productName: 'Vitamin C 500mg', acceptedQty: 5, unitPrice: i ? 105 : 100 }));
+  const samplePdf = buildPurchaseInvoicePdf(html(sample), { currency: 'INR', logo, items: sample });
+  assert.equal(table.body.length, 1);
+  assert.equal(table.body[0][6], '10');
+  assert.equal(table.body[0][10], '1025.00');
+  fs.writeFileSync('tmp/purchase-batch-qa/grouped-different-rates.pdf', Buffer.from(samplePdf.output('arraybuffer')));
   const many = Array.from({ length: 65 }, (_,i)=>({ ...items[i%2], batchNumber: `BATCH-${i+1}`, acceptedQty: 1 }));
   const long = buildPurchaseInvoicePdf(html(many), { currency: 'INR', logo, items: many });
   assert.equal(table.body[0][6], '65');

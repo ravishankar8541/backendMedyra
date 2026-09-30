@@ -7,7 +7,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: {
   fileSize: 10 * 1024 * 1024, files: 1, fields: 10, fieldSize: 64 * 1024
 } });
 
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const ctrl = require('../controllers/goodsReceiptController');
 
 // ============================================================
@@ -26,33 +26,33 @@ router.get('/dashboard', ctrl.getReceiptDashboard);
 
 // ========== INVOICE (PI) ROUTES (before /:id) ==========
 router.get('/invoices', ctrl.getConsolidatedInvoices);
-router.get('/invoices/:invoiceId/deletion-context', restrictTo('admin', 'manager'), ctrl.getInvoiceDeletionContext);
+router.get('/invoices/:invoiceId/deletion-context', authorize(), ctrl.getInvoiceDeletionContext);
 router.get('/invoices/:invoiceId', ctrl.getConsolidatedInvoice);
 router.put(
   '/invoices/:invoiceId',
-  restrictTo('admin', 'manager'),
+  authorize(),
   ctrl.updateConsolidatedInvoice
 );
 router.post(
   '/invoices/:invoiceId/payment',
-  restrictTo('admin', 'manager'),
+  authorize(),
   ctrl.addConsolidatedPayment
 );
 router.delete(
   '/invoices/:invoiceId',
-  restrictTo('admin', 'manager'),
+  authorize(),
   ctrl.deleteConsolidatedInvoice
 );
 router.delete(
   '/invoices',
-  restrictTo('admin', 'manager'),
+  authorize(),
   ctrl.deleteConsolidatedInvoice
 );
 
 // Send Purchase Invoice Email (PDF field name = "pdf")
 router.post(
   '/invoices/send-email',
-  restrictTo('admin', 'manager'),
+  authorize(),
   (req, res, next) => upload.single('pdf')(req, res, error => {
     if (!error) return next();
     return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
@@ -67,10 +67,10 @@ router.post(
 
 // ========== GOODS RECEIPT (GRN) ROUTES ==========
 router.get('/', ctrl.getGRNs);
-router.post('/', restrictTo('admin', 'manager'), ctrl.createGRN);
+router.post('/', authorize(), ctrl.createGRN);
 router.get('/:id', ctrl.getGRN);
-router.put('/:id', restrictTo('admin', 'manager'), ctrl.updateGRN);
-router.delete('/:id', restrictTo('admin', 'manager'), ctrl.deleteGRN);
-router.post('/:id/payment', restrictTo('admin', 'manager'), ctrl.addPayment);
+router.put('/:id', authorize(), ctrl.updateGRN);
+router.delete('/:id', authorize(), ctrl.deleteGRN);
+router.post('/:id/payment', authorize(), ctrl.addPayment);
 
 module.exports = router;

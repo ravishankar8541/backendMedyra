@@ -61,7 +61,7 @@ test('endpoint enforces client ownership and explicit invoice scoping', async ()
   assert.deepEqual(invoiceQuery, { leadId: client._id });
   assert.deepEqual(returnQuery, { invoice: { $in: ['inv'] } });
   assert.equal((await call({ id: 'admin', role: 'admin' })).status, 200);
-  assert.equal((await call({ id: 'manager', role: 'manager' })).status, 200);
+  assert.equal((await call({ id: 'manager', role: 'sales', permissions: ['sales:view','sales:all_records'] })).status, 200);
 });
 test('endpoint rejects invalid and missing clients', async () => {
   assert.equal((await call({ role: 'admin' }, 'invalid')).status, 400);

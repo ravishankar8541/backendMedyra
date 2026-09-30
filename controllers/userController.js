@@ -1,161 +1,102 @@
 const User = require('../models/User');
-const bcrypt = require('bcryptjs');
-
-// @desc    Get all users
-// @route   GET /api/users
-// @access  Private (Admin)
-exports.getUsers = async (req, res) => {
+const { validateAccess, normalizeRole } = require('../utils/accessPolicy');
+const migrate = require('../utils/migrateUserAccess');
+const invalid = message => Object.assign(new Error(message), { status: 400 });
+const statuses = ['active', 'inactive', 'pending', 'suspended'];
+const clean = user => { const result = user.toObject(); delete result.password; return result; };
+const handler = fn => async (req, res) => {
   try {
-    const { page = 1, limit = 10, role, status, search } = req.query;
-
-    const query = {};
-    if (role) query.role = role;
-    if (status) query.status = status;
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    const users = await User.find(query)
-      .select('-password')
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-
-    const total = await User.countDocuments(query);
-
-    res.json({
-      success: true,
-      data: users,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
+    if (req.user?.role !== 'admin') return res.status(403).json({ success: false, message: 'Only Admin can manage users.' });
+    await fn(req, res);
   } catch (error) {
-    console.error('Get users error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(error.status || (error.code === 11000 ? 409 : ['ValidationError', 'CastError'].includes(error.name) ? 400 : 500)).json({ success: false, message: error.code === 11000 ? 'This email is already in use.' : error.message });
   }
 };
-
-// @desc    Get single user
-// @route   GET /api/users/:id
-// @access  Private (Admin)
-exports.getUser = async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    res.json({ success: true, data: user });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ message: 'Server error' });
+function fields(body, existing) {
+  const updates = {};
+  for (const key of ['name', 'email', 'phone', 'department']) if (body[key] !== undefined) {
+    if (typeof body[key] !== 'string' || (key !== 'department' && !body[key].trim())) throw invalid(`${key} is required.`);
+    updates[key] = body[key].trim();
   }
-};
-
-// @desc    Update user
-// @route   PUT /api/users/:id
-// @access  Private (Admin)
-exports.updateUser = async (req, res) => {
-  try {
-    const updates = req.body;
-    
-    // Prevent password update here (use change-password endpoint)
-    delete updates.password;
-
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      updates,
-      { new: true, runValidators: true }
-    ).select('-password');
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({ success: true, data: user });
-  } catch (error) {
-    console.error('Update user error:', error);
-    res.status(500).json({ message: 'Server error' });
+  if (updates.email) {
+    updates.email = updates.email.toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updates.email)) throw invalid('Enter a valid email address.');
   }
-};
-
-// @desc    Delete user
-// @route   DELETE /api/users/:id
-// @access  Private (Admin)
-exports.deleteUser = async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    // Prevent admin from deleting themselves
-    if (user._id.toString() === req.user.id) {
-      return res.status(400).json({ message: 'Cannot delete your own account' });
-    }
-
-    await user.deleteOne();
-    res.json({ success: true, message: 'User deleted successfully' });
-  } catch (error) {
-    console.error('Delete user error:', error);
-    res.status(500).json({ message: 'Server error' });
+  updates.role = body.role === undefined ? normalizeRole(existing?.role || 'sales') : body.role;
+  updates.permissions = validateAccess(updates.role, body.permissions === undefined ? existing?.permissions || [] : body.permissions);
+  updates.status = body.status === undefined ? existing?.status || 'active' : body.status;
+  if (!statuses.includes(updates.status)) throw invalid('Invalid account status.');
+  updates.accessVersion = 1;
+  return updates;
+}
+function protectSelf(req, user, updates) {
+  if (String(user._id) === String(req.user._id || req.user.id)) throw invalid('You can only change your own password in User Management.');
+}
+exports.createUser = handler(async (req, res) => {
+  const updates = fields(req.body);
+  if (typeof req.body.password !== 'string' || req.body.password.length < 8) throw invalid('Use a password of at least 8 characters.');
+  const user = await User.create({ ...updates, password: req.body.password, emailVerified: true, accessUpdatedAt: new Date(), accessUpdatedBy: req.user._id || req.user.id });
+  res.status(201).json({ success: true, data: clean(user), user: clean(user) });
+});
+exports.getUsers = handler(async (req, res) => {
+  // Existing role names are upgraded once, preserving explicit legacy module grants.
+  const legacy = await User.find({ accessVersion: { $ne: 1 } }).select('-password');
+  for (const user of legacy) await migrate(user);
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const query = {};
+  if (req.query.role && req.query.role !== 'all') query.role = req.query.role;
+  if (req.query.status && req.query.status !== 'all') query.status = req.query.status;
+  if (req.query.search) {
+    const search = String(req.query.search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    query.$or = ['name', 'email', 'phone'].map(key => ({ [key]: { $regex: search, $options: 'i' } }));
   }
-};
-
-// @desc    Update user status
-// @route   PATCH /api/users/:id/status
-// @access  Private (Admin)
-exports.updateUserStatus = async (req, res) => {
-  try {
-    const { status } = req.body;
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
-    ).select('-password');
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({ success: true, data: user });
-  } catch (error) {
-    console.error('Update user status error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
-
-exports.resetPassword = async (req, res) => {
-  try {
-    const { newPassword, password } = req.body;
-    const user = await User.findById(req.params.id);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    // Agar frontend se newPassword aya hai toh wahi set karein, warna temp password
-    const passwordToSet = newPassword || password || Math.random().toString(36).slice(-8);
-    
-    user.password = passwordToSet;
-    user.forcePasswordChange = false;
+  const [users, total] = await Promise.all([User.find(query).select('-password').sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit), User.countDocuments(query)]);
+  res.json({ success: true, data: users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+});
+exports.getUser = handler(async (req, res) => {
+  const user = await migrate(await User.findById(req.params.id).select('-password'));
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+  res.json({ success: true, data: clean(user) });
+});
+exports.updateUser = handler(async (req, res) => {
+  const user = await migrate(await User.findById(req.params.id));
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+  const updates = fields(req.body, user);
+  if (String(user._id) === String(req.user._id || req.user.id)) {
+    const allowed = ['name', 'email', 'phone', 'department'];
+    if (Object.keys(req.body).some(key => !allowed.includes(key))) throw invalid('You can edit your profile details only. Use Change Password to change your password.');
+    for (const key of allowed) if (updates[key] !== undefined) user[key] = updates[key];
     await user.save();
-
-    res.json({
-      success: true,
-      message: 'Password updated successfully',
-      tempPassword: (!newPassword && !password) ? passwordToSet : undefined
-    });
-  } catch (error) {
-    console.error('Reset password error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.json({ success: true, data: clean(user) });
   }
-};
+  Object.assign(user, updates, { accessUpdatedAt: new Date(), accessUpdatedBy: req.user._id || req.user.id });
+  await user.save();
+  res.json({ success: true, data: clean(user) });
+});
+exports.updateUserStatus = handler(async (req, res) => {
+  const user = await migrate(await User.findById(req.params.id));
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+  if (!statuses.includes(req.body.status)) throw invalid('Invalid account status.');
+  protectSelf(req, user, { role: user.role, status: req.body.status });
+  user.status = req.body.status;
+  await user.save();
+  res.json({ success: true, data: clean(user) });
+});
+exports.deleteUser = handler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+  if (String(user._id) === String(req.user._id || req.user.id)) throw invalid('You cannot delete your own account.');
+  await user.deleteOne();
+  res.json({ success: true, message: 'User deleted.' });
+});
+exports.resetPassword = handler(async (req, res) => {
+  if (String(req.params.id) === String(req.user._id || req.user.id)) throw invalid('Use Change Password with your current password to update your own password.');
+  const password = req.body.newPassword || req.body.password;
+  if (typeof password !== 'string' || password.length < 8) throw invalid('Use a password of at least 8 characters.');
+  const user = await migrate(await User.findById(req.params.id));
+  if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+  user.password = password;
+  await user.save();
+  res.json({ success: true, message: 'Password updated. Existing sessions have been revoked.' });
+});

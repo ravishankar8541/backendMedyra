@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
 const Invoice = require('../models/Invoice');
@@ -9,7 +10,7 @@ exports.getClientLedger = async (req, res) => {
     const client = await Lead.findById(req.params.id).lean();
     if (!client) return res.status(404).json({ success: false, message: 'Client not found.' });
     const userId = String(req.user?._id || req.user?.id || '');
-    if (!['admin', 'manager'].includes(req.user?.role) && (!userId || ![client.assignedTo, client.createdBy].some(value => String(value?._id || value || '') === userId))) {
+    if (!can(req.user, 'sales', 'all_records') && (!userId || ![client.assignedTo, client.createdBy].some(value => String(value?._id || value || '') === userId))) {
       return res.status(403).json({ success: false, message: 'You can only view ledgers for your assigned or created clients.' });
     }
     // Explicit client identity only: names/emails can be shared by unrelated accounts.

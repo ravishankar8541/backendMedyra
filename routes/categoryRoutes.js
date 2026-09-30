@@ -1,7 +1,7 @@
 // routes/categoryRoutes.js
 const express = require("express");
 const router = express.Router();
-const { protect, restrictTo } = require("../middleware/auth");
+const { protect, authorize } = require("../middleware/auth");
 const {
   getCategories,
   createCategory,
@@ -12,9 +12,9 @@ const {
 router.get("/", protect, getCategories);
 
 // Create category (admin / manager)
-router.post("/", protect, restrictTo("admin", "manager"), createCategory);
+router.post("/", protect, authorize(), createCategory);
 
 // Delete category (admin only)
-router.delete("/:id", protect, restrictTo("admin"), deleteCategory);
+router.delete("/:id", protect, authorize(), deleteCategory);
 
 module.exports = router;

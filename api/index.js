@@ -82,7 +82,7 @@ const transporter = nodemailer.createTransport({
 // ============================================
 // TEST EMAIL - SIMPLE DEBUG ENDPOINT
 // ============================================
-app.post('/api/test-email', async (req, res) => {
+app.post('/api/test-email', require('../middleware/auth').protect, async (req, res) => {
   try {
     const { to } = req.body;
     
@@ -109,10 +109,10 @@ const mountRoute = (path, router, name) => {
   try {
     if (router && router.stack) {
       app.use(path, router);
-      console.log(`✅ ${name} mounted at ${path}`);
+      
     } else if (router && typeof router === 'function') {
       app.use(path, router);
-      console.log(`✅ ${name} mounted at ${path} (as function)`);
+      
     } else {
       console.warn(`⚠️ ${name} is not a valid router`);
     }

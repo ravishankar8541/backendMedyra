@@ -1,105 +1,34 @@
-// middleware/auth.js - COMPLETE FIXED VERSION
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-
-// ============================================
-// PROTECT MIDDLEWARE - Verify JWT
-// ============================================
+const migrateUserAccess = require('../utils/migrateUserAccess');
+const { can, canRequest } = require('../utils/accessPolicy');
 exports.protect = async (req, res, next) => {
   try {
-    let token;
-
-    // Get token from header
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-
-    if (!token) {
-      return res.status(401).json({ 
-        success: false,
-        message: 'Not authorized, no token' 
-      });
-    }
-
-    // Verify token
+    const token = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i)?.[1];
+    if (!token) return res.status(401).json({ success: false, message: 'Please sign in.' });
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('-password');
-
-    if (!user) {
-      return res.status(401).json({ 
-        success: false,
-        message: 'User not found' 
-      });
-    }
-
+    let user = await User.findById(decoded.id).select('-password');
+    if (!user || user.status !== 'active' || (decoded.v || 0) !== (user.authVersion || 0)) return res.status(401).json({ success: false, message: 'Your session is no longer active. Please sign in again.' });
+    user = await migrateUserAccess(user);
+    if (!user || user.status !== 'active' || (decoded.v || 0) !== (user.authVersion || 0)) return res.status(401).json({ success: false, message: 'Your session is no longer active. Please sign in again.' });
     req.user = user;
+    if (!canRequest(user, req)) return res.status(403).json({ success: false, message: 'Your administrator has not granted access to this action.' });
+    if (!await require('../utils/recordAccess')(req)) return res.status(403).json({ success: false, message: 'This record is not assigned to you. Ask Admin for team record access.' });
     next();
   } catch (error) {
-    console.error('Auth middleware error:', error);
-    
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ 
-        success: false,
-        message: 'Invalid token' 
-      });
-    }
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ 
-        success: false,
-        message: 'Token expired' 
-      });
-    }
-    
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error' 
-    });
+    const status = ['JsonWebTokenError', 'TokenExpiredError', 'CastError'].includes(error.name) ? 401 : 500;
+    res.status(status).json({ success: false, message: status === 401 ? 'Please sign in again.' : 'Unable to verify access.' });
   }
 };
-
-// ============================================
-// RESTRICT TO SPECIFIC ROLES
-// ============================================
-exports.restrictTo = (...roles) => {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({ 
-        success: false,
-        message: 'Not authorized' 
-      });
-    }
-
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        success: false,
-        message: `Role ${req.user.role} not authorized for this action. Allowed: ${roles.join(', ')}` 
-      });
-    }
-
-    next();
-  };
+// Permission-based routes replace fixed role allowlists. User administration
+// remains admin-only in the central request policy.
+exports.authorize = () => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ success: false, message: 'Please sign in.' });
+  if (!canRequest(req.user, req)) return res.status(403).json({ success: false, message: 'Your administrator has not granted access to this action.' });
+  next();
 };
-
-// ============================================
-// CHECK PERMISSION
-// ============================================
-exports.hasPermission = (permission) => {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({ 
-        success: false,
-        message: 'Not authorized' 
-      });
-    }
-
-    if (req.user.permissions?.includes('all') || 
-        req.user.permissions?.includes(permission)) {
-      return next();
-    }
-
-    res.status(403).json({ 
-      success: false,
-      message: `Permission '${permission}' required` 
-    });
-  };
+exports.hasPermission = permission => (req, res, next) => {
+  const [module, action = 'view'] = permission.split(':');
+  if (!can(req.user, module, action)) return res.status(403).json({ success: false, message: 'Permission required: ' + permission });
+  next();
 };

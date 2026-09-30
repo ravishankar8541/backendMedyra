@@ -1,5 +1,6 @@
 const Package = require('../models/Package');
 const mongoose = require('mongoose');
+const { normalizePackage, statuses } = require('../utils/packageValidation');
 
 // Helper to sanitize product items and prevent CastError on empty strings
 const sanitizeItem = (item) => {
@@ -19,19 +20,18 @@ const sanitizeItem = (item) => {
 // ============================================
 exports.getPackages = async (req, res) => {
   try {
-    const { search, status, priority, startDate, endDate, limit = 200 } = req.query;
+    const { search, status, priority, startDate, endDate } = req.query;
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const query = {};
 
     if (status && status !== 'all') query.status = status;
     if (priority && priority !== 'all') query.priority = priority;
 
     if (search) {
+      const literalSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { orderId: { $regex: search, $options: 'i' } },
-        { customerName: { $regex: search, $options: 'i' } },
-        { invoiceNo: { $regex: search, $options: 'i' } },
-        { 'products.name': { $regex: search, $options: 'i' } },
-        { 'boxes.boxNumber': { $regex: search, $options: 'i' } }
+        ...['orderId', 'customerName', 'invoiceNo', 'products.name', 'boxes.boxNumber', 'boxes.items.name', 'boxes.items.batchNo'].map(field => ({ [field]: { $regex: literalSearch, $options: 'i' } }))
       ];
     }
 
@@ -44,9 +44,11 @@ exports.getPackages = async (req, res) => {
     const packages = await Package.find(query)
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit));
+      .skip((page - 1) * limit)
+      .limit(limit);
+    const total = await Package.countDocuments(query);
 
-    res.json({ success: true, data: packages });
+    res.json({ success: true, data: packages, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
   } catch (error) {
     console.error('getPackages error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -114,7 +116,10 @@ exports.createPackage = async (req, res) => {
       }];
     }
 
-    const newPackage = new Package(data);
+    let normalized;
+    try { normalized = normalizePackage(data); }
+    catch (error) { return res.status(400).json({ success: false, message: error.message }); }
+    const newPackage = new Package(normalized);
     await newPackage.save();
 
     res.status(201).json({
@@ -134,7 +139,16 @@ exports.createPackage = async (req, res) => {
 exports.updatePackage = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = { ...req.body };
+    let updateData;
+    try { updateData = normalizePackage(req.body); }
+    catch (error) { return res.status(400).json({ success: false, message: error.message }); }
+    // Changing carton contents invalidates previously generated documents.
+    if (updateData.boxes) {
+      updateData.labelGenerated = false;
+      updateData.packingSlipGenerated = false;
+      updateData.labelGeneratedAt = null;
+      updateData.packingSlipGeneratedAt = null;
+    }
 
     // Sanitize products array
     if (updateData.products && Array.isArray(updateData.products)) {
@@ -202,12 +216,13 @@ exports.deletePackage = async (req, res) => {
 exports.updatePackageStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const updateData = { status };
+    if (!statuses.includes(status)) return res.status(400).json({ success: false, message: 'Invalid package status.' });
+    const updateData = { status, completedDate: '' };
     if (status === 'completed') {
       updateData.completedDate = new Date().toISOString().split('T')[0];
     }
 
-    const pkg = await Package.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    const pkg = await Package.findByIdAndUpdate(req.params.id, updateData, { new: true, runValidators: true });
     if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
     
     res.json({ success: true, data: pkg, message: `Status updated to ${status}` });

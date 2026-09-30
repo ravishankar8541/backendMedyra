@@ -5,12 +5,12 @@ const {
   getInventoryReport,
   getUserReport
 } = require('../controllers/reportController');
-const { protect, restrictTo } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 
 router.use(protect);
 
-router.get('/sales', restrictTo('admin', 'manager', 'accountant'), getSalesReport);
-router.get('/inventory', restrictTo('admin', 'manager'), getInventoryReport);
-router.get('/users', restrictTo('admin'), getUserReport);
+router.get('/sales', authorize(), getSalesReport);
+router.get('/inventory', authorize(), getInventoryReport);
+router.get('/users', authorize(), getUserReport);
 
 module.exports = router;

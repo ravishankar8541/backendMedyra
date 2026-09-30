@@ -1,0 +1,56 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server');
+const controller = require('../controllers/accountingController');
+const Invoice = require('../models/Invoice');
+const Journal = require('../models/JournalEntry');
+require('../models/User');
+let mongo;
+before(async () => {
+  mongo = await MongoMemoryServer.create();
+  await mongoose.connect(mongo.getUri(), { dbName: 'accounting_endpoint_tests' });
+});
+after(async () => { await mongoose.disconnect(); await mongo?.stop(); });
+async function call(method, query = {}, body = {}, params = {}) {
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(data) { this.body = data; return this; } };
+  await controller[method]({ query, body, params, user: {} }, res);
+  assert.ok(res.statusCode < 500, JSON.stringify(res.body));
+  return res;
+}
+test('journal CRUD, INR statements, opening balances and date validation use real database queries', async () => {
+  const accounts = (await call('getAccounts')).body.data;
+  const bank = accounts.find(a => a.code === '1010');
+  const capital = accounts.find(a => a.code === '3000');
+  const manual = await call('createJournalEntry', {}, { date: '2026-08-31', memo: 'Opening capital', lines: [{ account: bank._id, debit: 100 }, { account: capital._id, credit: 100 }] });
+  assert.equal(manual.statusCode, 201);
+  await Invoice.create({ invoiceNumber: 'USD-REPORT', date: '2026-09-02', dueDate: '2026-09-30', status: 'sent', type: 'international', currency: 'USD', exchangeRate: 80, subtotal: 10, total: 10, paidAmount: 5, dueAmount: 5, customer: { name: 'Customer', address: 'Address' }, company: { name: 'Medyra' }, payments: [{ amount: 5, date: '2026-09-03', method: 'bank_transfer' }] });
+  const ledger = (await call('getGeneralLedger', { accountId: String(bank._id), startDate: '2026-09-01', endDate: '2026-09-30' })).body.data;
+  assert.equal(ledger.openingBalance, 100);
+  assert.equal(ledger.closingBalance, 500);
+  const trial = (await call('getTrialBalance', { asOfDate: '2026-09-30' })).body.data;
+  assert.equal(trial.isBalanced, true);
+  const pnl = (await call('getProfitLoss', { startDate: '2026-09-01', endDate: '2026-09-30' })).body.data;
+  assert.equal(pnl.revenue.exportSales, 800);
+  const bs = (await call('getBalanceSheet', { asOfDate: '2026-09-30' })).body.data;
+  assert.equal(bs.assets.totalAssets, 900);
+  assert.equal(bs.isBalanced, true);
+  const page = (await call('getJournalEntries', { limit: '1', page: '2' })).body;
+  assert.equal(page.data.length, 1);
+  assert.equal(page.pagination.total, 3);
+  assert.equal((await call('getProfitLoss', { startDate: '2026-10-01', endDate: '2026-09-01' })).statusCode, 400);
+  assert.equal((await call('createAccount', {}, { code: 'QA', name: 'Bad classification', type: 'asset', subType: 'tax_payable' })).statusCode, 400);
+  const automatic = await Journal.findOne({ sourceModule: 'sales_invoice' });
+  assert.equal((await call('deleteJournalEntry', {}, {}, { id: String(automatic._id) })).statusCode, 400);
+  assert.equal((await call('deleteJournalEntry', {}, {}, { id: String(manual.body.data._id) })).statusCode, 200);
+  const SalesReturn = require('../models/SalesReturn');
+  const sourceId = new mongoose.Types.ObjectId();
+  await SalesReturn.collection.insertOne({ _id: sourceId, currency: 'USD', exchangeRate: 80 });
+  const revenue = accounts.find(a => a.code === '4010');
+  const receivable = accounts.find(a => a.code === '1020');
+  for (let n = 0; n < 2; n++) await Journal.create({ entryNumber: `RETURN-${n}`, sourceModule: 'sales_return', sourceId, date: '2026-09-04', memo: 'Foreign return', currency: 'USD', totalDebit: 1, totalCredit: 1, lines: [{ account: revenue._id, debit: 1 }, { account: receivable._id, credit: 1 }] });
+  const returns = (await call('getJournalEntries', { sourceModule: 'sales_return' })).body.data;
+  assert.equal(returns.length, 2);
+  assert.ok(returns.every(j => j.currency === 'INR' && j.totalDebit === 80));
+  assert.equal((await call('getProfitLoss', { startDate: '2026-09-01', endDate: '2026-09-30' })).body.data.netProfit, 640);
+});

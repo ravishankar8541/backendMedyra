@@ -3,23 +3,11 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 
-// ✅ ADD THIS: Helper function for default permissions
-const getDefaultPermissions = (role) => {
-  const rolePermissions = {
-    admin: ['all'],
-    manager: ['inventory', 'accounting', 'reports'],
-    accountant: ['accounting', 'payment', 'reports'],
-    telecaller: ['telecaller'],
-    delivery_agent: ['delivery'],
-    staff: ['telecaller', 'packaging', 'delivery']
-  };
-  return rolePermissions[role] || [];
-};
-
+const migrateUserAccess = require('../utils/migrateUserAccess');
 // Generate JWT Token
 const generateToken = (user) => {
   return jwt.sign(
-    { id: user._id, email: user.email, role: user.role },
+    { id: user._id, email: user.email, role: user.role, v: user.authVersion || 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRE || '7d' }
   );
@@ -28,53 +16,7 @@ const generateToken = (user) => {
 // @desc    Register user
 // @route   POST /api/auth/register
 // @access  Public
-exports.register = async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const { name, email, password, phone, role, department, status } = req.body;
-
-    // Check if user exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
-
-    const userRole = role || 'staff';
-    const user = new User({
-      name,
-      email,
-      password,
-      phone,
-      role: userRole,
-      department: department || 'General',
-      status: status || 'active', // ✅ Defaults to 'active' so the user can immediately log in
-      emailVerified: true,
-      permissions: getDefaultPermissions(userRole)
-    });
-
-    await user.save();
-
-    // Remove password from response
-    const userResponse = user.toObject();
-    delete userResponse.password;
-
-    // Generate token
-    const token = generateToken(user);
-
-    res.status(201).json({
-      success: true,
-      token,
-      user: userResponse
-    });
-  } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
+exports.register = require('./userController').createUser;
 // @desc    Login user with Strict Role Verification
 // @route   POST /api/auth/login
 // @access  Public
@@ -96,7 +38,7 @@ exports.login = async (req, res) => {
 
     // 1. Case-insensitive & trimmed search
     const cleanEmail = email.toLowerCase().trim();
-    const user = await User.findOne({ email: cleanEmail });
+    let user = await User.findOne({ email: cleanEmail });
 
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials. User not found.' });
@@ -115,16 +57,13 @@ exports.login = async (req, res) => {
       });
     }
 
+    user = await migrateUserAccess(user);
+
     // 4. ✅ STRICT ROLE CHECK: Jo role select kiya hai wahi database me hona chahiye
     if (role && user.role !== role) {
       return res.status(403).json({ 
         message: `Role mismatch! This account is registered as '${user.role}', but you selected '${role}'.` 
       });
-    }
-
-    // Fix permissions if missing
-    if (!user.permissions || user.permissions.length === 0) {
-      user.permissions = getDefaultPermissions(user.role);
     }
 
     // Update last login
@@ -165,13 +104,9 @@ exports.getMe = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // ✅ ADD THIS: Fix existing users without permissions
-    if (!user.permissions || user.permissions.length === 0) {
-      user.permissions = getDefaultPermissions(user.role);
-      await user.save();
-    }
-
-    res.json(user);
+    const result = user.toObject();
+    delete result.password;
+    res.json(result);
   } catch (error) {
     console.error('GetMe error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -184,15 +119,17 @@ exports.getMe = async (req, res) => {
 exports.changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
+    if (typeof currentPassword !== 'string' || !currentPassword) return res.status(400).json({ message: 'Enter your current password.' });
     const user = await User.findById(req.user.id);
 
     // Verify current password
     const isMatch = await user.comparePassword(currentPassword);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Current password is incorrect' });
+      return res.status(400).json({ message: 'Current password is incorrect' });
     }
 
     // Update password
+    if (typeof newPassword !== 'string' || newPassword.length < 8) return res.status(400).json({ message: 'Use a password of at least 8 characters.' });
     user.password = newPassword;
     user.forcePasswordChange = false;
     await user.save();

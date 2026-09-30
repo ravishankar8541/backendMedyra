@@ -18,7 +18,11 @@ nodemailer.createTransport = options => {
     }
   };
 };
+const auth = require('../middleware/auth');
+const originalProtect = auth.protect;
+auth.protect = (req, res, next) => { req.user = { role: 'admin' }; next(); };
 const router = require('../routes/purchaseOrderRoutes');
+auth.protect = originalProtect;
 const PurchaseOrder = require('../models/PurchaseOrder');
 const { sendPOEmail } = require('../controllers/purchaseOrderController');
 process.env.EMAIL_USER = 'sender@example.com';

@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const Followup = require('../models/FollowUp'); 
 const Lead = require('../models/Lead');
 
@@ -31,7 +32,7 @@ exports.getFollowups = async (req, res) => {
     }
 
     // ✅ Filter by assigned user for telecallers
-    if (req.user.role === 'telecaller') {
+    if (!can(req.user, 'sales', 'all_records')) {
       query.assignedTo = req.user.id;
     }
 
@@ -125,7 +126,7 @@ exports.updateFollowup = async (req, res) => {
     }
 
     // ✅ Check authorization
-    if (req.user.role === 'telecaller' &&
+    if (!can(req.user, 'sales', 'all_records') &&
         followup.assignedTo.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
@@ -169,7 +170,7 @@ exports.completeFollowup = async (req, res) => {
     }
 
     // ✅ Check authorization
-    if (req.user.role === 'telecaller' &&
+    if (!can(req.user, 'sales', 'all_records') &&
         followup.assignedTo.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
@@ -209,7 +210,7 @@ exports.deleteFollowup = async (req, res) => {
     }
 
     // ✅ Check authorization
-    if (req.user.role === 'telecaller' &&
+    if (!can(req.user, 'sales', 'all_records') &&
         followup.assignedTo.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
@@ -231,7 +232,7 @@ exports.deleteFollowup = async (req, res) => {
 // ============================================
 exports.getFollowupStats = async (req, res) => {
   try {
-    const query = req.user.role === 'telecaller'
+    const query = !can(req.user, 'sales', 'all_records')
       ? { assignedTo: req.user.id }
       : {};
 

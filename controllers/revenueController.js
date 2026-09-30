@@ -1,3 +1,4 @@
+const { can } = require('../utils/accessPolicy');
 const Revenue = require('../models/Revenue');
 
 // ============================================
@@ -12,7 +13,7 @@ exports.getRevenue = async (req, res) => {
     if (year) query.year = parseInt(year);
     if (periodKey) query.periodKey = periodKey;
 
-    if (req.user.role === 'telecaller') {
+    if (!can(req.user, 'sales', 'all_records')) {
       query.assignedTo = req.user.id;
     }
 
@@ -35,7 +36,7 @@ exports.getRevenue = async (req, res) => {
 // ============================================
 exports.getRevenueStats = async (req, res) => {
   try {
-    const query = req.user.role === 'telecaller'
+    const query = !can(req.user, 'sales', 'all_records')
       ? { assignedTo: req.user.id }
       : {};
 
@@ -99,7 +100,7 @@ exports.getRevenueByPeriod = async (req, res) => {
 
     const query = {
       period,
-      ...(req.user.role === 'telecaller' && { assignedTo: req.user.id })
+      ...(!can(req.user, 'sales', 'all_records') && { assignedTo: req.user.id })
     };
 
     const revenues = await Revenue.find(query)
