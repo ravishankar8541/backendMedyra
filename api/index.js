@@ -47,9 +47,6 @@ const vendorPriceListRoutes = require('../routes/vendorPriceListRoutes');
 const clientPriceListRoutes = require('../routes/clientPriceListRoutes');
 const app = express();
 
-// Connect to database
-dbConnection();
-
 app.use(cors({
   origin: ['https://medyra-frontend-30-sept.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:5175', 'http://localhost:3000'],
   credentials: true,
@@ -192,8 +189,10 @@ app.use((err, req, res, next) => {
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+dbConnection().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
 });
 
 
