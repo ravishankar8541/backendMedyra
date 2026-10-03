@@ -288,14 +288,13 @@ exports.getPublicInvoiceView = async (req, res) => {
       return sum + qty * rate;
     }, 0);
     const totalTax = Number(invoice.totalTax || 0);
+    const cgstAmount = Math.round((totalTax / 2) * 100) / 100;
+    const sgstAmount = Number((totalTax - cgstAmount).toFixed(2));
     const grandTotal = Number(
       invoice.grandTotal || itemsSubtotal + freight + insurance + inventory + totalTax
     );
     const paidAmt = Number(invoice.paidAmount || 0);
     const balanceAmt = Math.max(0, grandTotal - Number(invoice.returnCredit || 0) - paidAmt);
-    const taxTypeLabel =
-      invoice.gstType === 'cgst_sgst' ? 'CGST + SGST' : 'IGST';
-
     let chargeRows = '';
     if (freight > 0) {
       rowIndex++;
@@ -447,10 +446,12 @@ exports.getPublicInvoiceView = async (req, res) => {
         ${freight > 0 ? `<div class="total-row"><span>Freight</span><span>${symbol}${freight.toFixed(2)}</span></div>` : ''}
         ${insurance > 0 ? `<div class="total-row"><span>Insurance</span><span>${symbol}${insurance.toFixed(2)}</span></div>` : ''}
         ${inventory > 0 ? `<div class="total-row"><span>Inventory / Handling</span><span>${symbol}${inventory.toFixed(2)}</span></div>` : ''}
-        <div class="total-row">
-          <span style="color:#475569;font-weight:700;">Total Tax (${taxTypeLabel})</span>
-          <span style="font-weight:800;color:#d97706;">${symbol}${totalTax.toFixed(2)}</span>
-        </div>
+        ${invoice.gstType === 'cgst_sgst' ? `
+        <div class="total-row"><span style="color:#475569;font-weight:700;">Total CGST</span><span style="font-weight:800;color:#d97706;">${symbol}${cgstAmount.toFixed(2)}</span></div>
+        <div class="total-row"><span style="color:#475569;font-weight:700;">Total SGST</span><span style="font-weight:800;color:#d97706;">${symbol}${sgstAmount.toFixed(2)}</span></div>
+        ` : `
+        <div class="total-row"><span style="color:#475569;font-weight:700;">Total IGST</span><span style="font-weight:800;color:#d97706;">${symbol}${totalTax.toFixed(2)}</span></div>
+        `}
         <div class="total-row final">
           <span style="text-transform:uppercase;">TOTAL (${currency})</span>
           <span>${symbol}${grandTotal.toFixed(2)}</span>

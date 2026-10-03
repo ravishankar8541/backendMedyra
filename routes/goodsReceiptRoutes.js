@@ -9,12 +9,14 @@ const upload = multer({ storage: multer.memoryStorage(), limits: {
 
 const { protect, authorize } = require('../middleware/auth');
 const ctrl = require('../controllers/goodsReceiptController');
+const invoiceShare = require('../controllers/purchaseInvoiceShareController');
 
 // ============================================================
 // PUBLIC ROUTES (NO AUTH) — must be BEFORE router.use(protect)
 // ============================================================
 // WhatsApp / share link for Purchase Invoice
 router.get('/invoices/public-view/:id', ctrl.getPublicInvoiceView);
+router.get('/invoices/document/:token', invoiceShare.view);
 
 // ============================================================
 // AUTH REQUIRED FROM HERE
@@ -63,6 +65,21 @@ router.post(
     });
   }),
   ctrl.sendPurchaseInvoiceEmail
+);
+
+router.post(
+  '/invoices/share',
+  authorize(),
+  (req, res, next) => upload.single('pdf')(req, res, error => {
+    if (!error) return next();
+    return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      success: false,
+      message: error.code === 'LIMIT_FILE_SIZE'
+        ? 'The invoice PDF exceeds the 10 MB sharing limit.'
+        : 'Attach one purchase invoice PDF up to 10 MB.'
+    });
+  }),
+  invoiceShare.create
 );
 
 // ========== GOODS RECEIPT (GRN) ROUTES ==========
