@@ -4,6 +4,7 @@ const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const multer = require('multer');
 const { sendDebitNoteEmail } = require('../controllers/debitNoteEmailController');
+const purchaseReturnShare = require('../controllers/purchaseReturnShareController');
 const upload = multer({ storage: multer.memoryStorage(), limits: {
   fileSize: 10 * 1024 * 1024, files: 1, fields: 1, fieldSize: 64 * 1024
 } });
@@ -22,6 +23,7 @@ const {
 
 // Public Debit Note View (no login required for direct print or sharing)
 router.get('/public-view/:id', getPublicDebitNoteView);
+router.get('/document/:token', purchaseReturnShare.view);
 
 router.use(protect);
 
@@ -35,6 +37,17 @@ router.post('/:id/send-email', authorize(), (req, res, next) => {
     });
   });
 }, sendDebitNoteEmail);
+
+router.post('/:id/share', authorize(), (req, res, next) => {
+  upload.single('pdf')(req, res, error => {
+    if (!error) return next();
+    return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      success: false, message: error.code === 'LIMIT_FILE_SIZE'
+        ? 'The debit note PDF exceeds the 10 MB sharing limit.'
+        : 'Attach one debit note PDF.'
+    });
+  });
+}, purchaseReturnShare.share);
 
 router.get('/source/:invoiceId', authorize(), getReturnSource);
 router.post('/:id/cancel', authorize(), cancelPurchaseReturn);

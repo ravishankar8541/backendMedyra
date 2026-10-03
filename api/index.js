@@ -48,7 +48,7 @@ const clientPriceListRoutes = require('../routes/clientPriceListRoutes');
 const app = express();
 
 app.use(cors({
-  origin: ['https://frontend-medyra.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:5175', 'http://localhost:3000'],
+  origin: ['https://frontend-medyra.vercel.app', 'https://medyra-frontend-pi.vercel.app', 'http://localhost:5174', 'http://localhost:5173', 'http://localhost:5000', 'http://localhost:5175', 'http://localhost:3000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   // Let cors reflect Access-Control-Request-Headers for trusted origins. This
